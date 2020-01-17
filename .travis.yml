@@ -8,7 +8,10 @@ go:
  - "1.12"
  - master
 env:
-- GO111MODULE=on
+ global:
+  - GO111MODULE=on
+  # DOCKER_USERNAME / DOCKER_PASSWORD
+  - secure: daqhftXkEgNU58R8xtvj34lwUMjylEk7ReL6jxAxSOGcYLCdIl3wXF/3+IoluiVWzEikrxGTbuI9M5AMTMHpSJS7dfH6bUxiTorNDie+Ee2q+80z5AFPof90Th08gK7jKQfT6TOdaN0BHGYHAmOHi0jufpbEL3YS9Vi1XnLsiOpKZXV/2dFaGtvgJCPlLxKj6+y6IyvrZWn0wPqXOKkeh6DIUDNc5lOH/nzYA7zFw0yzuSAHEHOMRUfwgDIily9yf0l6ichkWzefKQlXlHEXllusKIw2d62GABPb8qwK51CaYK5B6rbFaKBtInfW3jQhyTqWxa+QcnCVS3T6weojX+EKSzhM69+xHSusLHcU6LqgtreUDGOmzjONhniUWDEnuuR+pArk18avWwwefIknXLdfJsDqCr1T98OOAjM2e6F9GvwlhCV+q/Ou6goMqQlE89CCZYULmNkp9S9GosGabyqnGxXF+s4XK90gpphH8+/jaTNbnPMsxlP43VaRBb6MezsiLnvN4AvnhSfT74r7rhe1hUoHy+sUmLYsAEqtfVhjQtWsXh/O3UpBPV5LcdWI2/fs9rQhySoU0p5+pHtXRZ8/hHeeO/ghSNg8BZUSpXcvNitBLZ9wekxUC/NHzKy8H9vS7A8ow5DmnXsYXET7gQVEocet9uHLOGzTHtyLDbc=
 services:
  - docker
 before_install:
@@ -21,11 +24,9 @@ install:
 script:
  - make
  - make test
- - make clean && BUILD_TAGS="disable_custom_plugin_monitor" make
- - BUILD_TAGS="disable_custom_plugin_monitor" make test
- - make clean && BUILD_TAGS="disable_system_log_monitor" make
- - BUILD_TAGS="disable_system_log_monitor" make test
- - make clean && BUILD_TAGS="disable_system_stats_monitor" make
- - BUILD_TAGS="disable_system_stats_monitor" make test
- - make clean && BUILD_TAGS="disable_stackdriver_exporter" make
- - BUILD_TAGS="disable_stackdriver_exporter" make test
+deploy:
+ provider: script
+ skip_cleanup: true
+ script: make REGISTRY=syseleven ci-push-image
+ on:
+  tags: true
