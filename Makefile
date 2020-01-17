@@ -147,6 +147,10 @@ push-tar: build-tar
 
 push: push-container push-tar
 
+ci-push-image:
+	echo "$$DOCKER_PASSWORD" | docker login -u "$$DOCKER_USERNAME" --password-stdin
+	docker push $(IMAGE)
+
 clean:
 	rm -f bin/log-counter
 	rm -f bin/node-problem-detector
