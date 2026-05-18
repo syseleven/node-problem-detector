@@ -25,7 +25,7 @@ all: build
 
 # PLATFORMS is the set of OS_ARCH that NPD can build against.
 LINUX_PLATFORMS=linux_amd64 linux_arm64
-DOCKER_PLATFORMS=linux/amd64,linux/arm64
+DOCKER_PLATFORMS=linux/amd64
 PLATFORMS=$(LINUX_PLATFORMS) windows_amd64
 
 # BRANCH is the git branch.
@@ -38,7 +38,7 @@ VERSION?=$(shell git describe --tags --always --dirty)
 TAG?=$(VERSION)
 
 # REGISTRY is the container registry to push into.
-REGISTRY?=gcr.io/k8s-staging-npd
+REGISTRY?=syseleven
 
 # UPLOAD_PATH is the cloud storage path to upload release tar.
 UPLOAD_PATH?=gs://kubernetes-release
@@ -339,7 +339,8 @@ push-tar: build-tar
 
 ci-push-image:
 	echo "$$DOCKER_PASSWORD" | docker login -u "$$DOCKER_USERNAME" --password-stdin
-	docker push $(IMAGE)
+	docker build $(IMAGE_TAGS) --build-arg LOGCOUNTER=$(LOGCOUNTER) .
+	docker push $(REGISTRY)/node-problem-detector:$(TAG)
 
 # `make push` is used by presubmit and CI jobs.
 push: push-container push-tar
