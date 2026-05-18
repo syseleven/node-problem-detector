@@ -337,6 +337,10 @@ push-tar: build-tar
 	gsutil cp $(TARBALL) $(UPLOAD_PATH)/node-problem-detector/
 	gsutil cp node-problem-detector-$(VERSION)-*.tar.gz* $(UPLOAD_PATH)/node-problem-detector/
 
+ci-push-image:
+	echo "$$DOCKER_PASSWORD" | docker login -u "$$DOCKER_USERNAME" --password-stdin
+	docker push $(IMAGE)
+
 # `make push` is used by presubmit and CI jobs.
 push: push-container push-tar
 
