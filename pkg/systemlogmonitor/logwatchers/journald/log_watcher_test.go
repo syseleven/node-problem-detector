@@ -1,3 +1,4 @@
+//go:build journald
 // +build journald
 
 /*
@@ -23,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coreos/go-systemd/sdjournal"
+	"github.com/coreos/go-systemd/v22/sdjournal"
 	"github.com/stretchr/testify/assert"
 
 	"k8s.io/node-problem-detector/pkg/systemlogmonitor/logwatchers/types"
@@ -66,7 +67,7 @@ func TestTranslate(t *testing.T) {
 }
 
 func TestGoroutineLeak(t *testing.T) {
-	orignal := runtime.NumGoroutine()
+	original := runtime.NumGoroutine()
 	w := NewJournaldWatcher(types.WatcherConfig{
 		Plugin:       "journald",
 		PluginConfig: map[string]string{"source": "not-exist-service"},
@@ -75,5 +76,5 @@ func TestGoroutineLeak(t *testing.T) {
 	})
 	_, err := w.Watch()
 	assert.Error(t, err)
-	assert.Equal(t, orignal, runtime.NumGoroutine())
+	assert.Equal(t, original, runtime.NumGoroutine())
 }

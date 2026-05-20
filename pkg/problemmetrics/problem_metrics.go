@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/golang/glog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/node-problem-detector/pkg/util/metrics"
 )
@@ -56,7 +56,7 @@ func NewProblemMetricsManagerOrDie() *ProblemMetricsManager {
 		metrics.Sum,
 		[]string{"reason"})
 	if err != nil {
-		glog.Fatalf("Failed to create problem_counter metric: %v", err)
+		klog.Fatalf("Failed to create problem_counter metric: %v", err)
 	}
 
 	pmm.problemGauge, err = metrics.NewInt64Metric(
@@ -67,7 +67,7 @@ func NewProblemMetricsManagerOrDie() *ProblemMetricsManager {
 		metrics.LastValue,
 		[]string{"type", "reason"})
 	if err != nil {
-		glog.Fatalf("Failed to create problem_gauge metric: %v", err)
+		klog.Fatalf("Failed to create problem_gauge metric: %v", err)
 	}
 
 	pmm.problemTypeToReason = make(map[string]string)
@@ -78,7 +78,7 @@ func NewProblemMetricsManagerOrDie() *ProblemMetricsManager {
 // IncrementProblemCounter increments the value of a problem counter.
 func (pmm *ProblemMetricsManager) IncrementProblemCounter(reason string, count int64) error {
 	if pmm.problemCounter == nil {
-		return errors.New("problem counter is being incremented before initialized.")
+		return errors.New("problem counter is being incremented before initialized")
 	}
 
 	return pmm.problemCounter.Record(map[string]string{"reason": reason}, count)
@@ -87,7 +87,7 @@ func (pmm *ProblemMetricsManager) IncrementProblemCounter(reason string, count i
 // SetProblemGauge sets the value of a problem gauge.
 func (pmm *ProblemMetricsManager) SetProblemGauge(problemType string, reason string, value bool) error {
 	if pmm.problemGauge == nil {
-		return errors.New("problem gauge is being set before initialized.")
+		return errors.New("problem gauge is being set before initialized")
 	}
 
 	pmm.problemTypeToReasonMutex.Lock()

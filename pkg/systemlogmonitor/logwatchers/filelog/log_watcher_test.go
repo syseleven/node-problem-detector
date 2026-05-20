@@ -17,17 +17,16 @@ limitations under the License.
 package filelog
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	testclock "k8s.io/utils/clock/testing"
+
 	"k8s.io/node-problem-detector/pkg/systemlogmonitor/logwatchers/types"
 	logtypes "k8s.io/node-problem-detector/pkg/systemlogmonitor/types"
 	"k8s.io/node-problem-detector/pkg/util"
-
-	"code.cloudfoundry.org/clock/fakeclock"
-	"github.com/stretchr/testify/assert"
 )
 
 // getTestPluginConfig returns a plugin config for test. Use configuration for
@@ -43,7 +42,7 @@ func getTestPluginConfig() map[string]string {
 func TestWatch(t *testing.T) {
 	// now is a fake time
 	now := time.Date(time.Now().Year(), time.January, 2, 3, 4, 5, 0, time.Local)
-	fakeClock := fakeclock.NewFakeClock(now)
+	fakeClock := testclock.NewFakeClock(now)
 	testCases := []struct {
 		uptime   time.Duration
 		lookback string
@@ -139,13 +138,17 @@ Jan  2 03:04:05 kernel: [2.000000] 3
 	}
 	for c, test := range testCases {
 		t.Logf("TestCase #%d: %#v", c+1, test)
-		f, err := ioutil.TempFile("", "log_watcher_test")
+		f, err := os.CreateTemp("", "log_watcher_test")
 		assert.NoError(t, err)
 		defer func() {
-			f.Close()
-			os.Remove(f.Name())
+			if err := f.Close(); err != nil {
+				t.Logf("failed to close temporary file %s: %v", f.Name(), err)
+			}
+			if err := os.Remove(f.Name()); err != nil {
+				t.Logf("failed to remove temporary file %s: %v", f.Name(), err)
+			}
 		}()
-		_, err = f.Write([]byte(test.log))
+		_, err = f.WriteString(test.log)
 		assert.NoError(t, err)
 
 		w := NewSyslogWatcherOrDie(types.WatcherConfig{
@@ -156,8 +159,6 @@ Jan  2 03:04:05 kernel: [2.000000] 3
 		})
 		// Set the startTime.
 		w.(*filelogWatcher).startTime, _ = util.GetStartTime(fakeClock.Now(), test.uptime, test.lookback, test.delay)
-		// Set the fake clock.
-		w.(*filelogWatcher).clock = fakeClock
 		logCh, err := w.Watch()
 		assert.NoError(t, err)
 		defer w.Stop()
@@ -170,12 +171,44 @@ Jan  2 03:04:05 kernel: [2.000000] 3
 			}
 		}
 		// The log channel should have already been drained
-		// There could stil be future messages sent into the channel, but the chance is really slim.
+		// There could still be future messages sent into the channel, but the chance is really slim.
 		timeout := time.After(100 * time.Millisecond)
 		select {
 		case log := <-logCh:
 			t.Errorf("unexpected extra log: %+v", *log)
 		case <-timeout:
+		}
+	}
+}
+
+func TestFilterSkipList(t *testing.T) {
+	s := &filelogWatcher{
+		cfg: types.WatcherConfig{
+			SkipList: []string{
+				" audit:", " kubelet:",
+			},
+		},
+	}
+	testcase := []struct {
+		log    string
+		expect bool
+	}{
+		{
+			log:    `Jan  2 03:04:03 kernel: [0.000000] 1`,
+			expect: false,
+		},
+		{
+			log:    `Jan  2 03:04:04 audit: [1.000000] 2`,
+			expect: true,
+		},
+		{
+			log:    `Jan  2 03:04:05 kubelet: [2.000000] 3`,
+			expect: true,
+		},
+	}
+	for i, test := range testcase {
+		if s.filterSkipList(test.log) != test.expect {
+			t.Errorf("test case %d: expect %v but got %v", i, test.expect, s.filterSkipList(test.log))
 		}
 	}
 }

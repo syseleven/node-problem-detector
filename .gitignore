@@ -1,7 +1,13 @@
 /bin/
-/Dockerfile
-/*.tar.gz
+.bin
+/test/bin/
+/*.tar.gz*
 ci.env
 pr.env
 junit*.xml
-/.idea
+debug.test
+/output/
+coverage.out
+.idea/
+*.DS_Store
+*.iml

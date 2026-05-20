@@ -18,16 +18,22 @@ package types
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 )
 
 var (
-	defaultInvokeIntervalString = (60 * time.Second).String()
-	defaultlsblkTimeoutString   = (5 * time.Second).String()
+	defaultInvokeIntervalString   = (60 * time.Second).String()
+	defaultlsblkTimeoutString     = (5 * time.Second).String()
+	defaultKnownModulesConfigPath = "guestosconfig/known-modules.json"
 )
 
 type MetricConfig struct {
 	DisplayName string `json:"displayName"`
+}
+
+type CPUStatsConfig struct {
+	MetricsConfigs map[string]MetricConfig `json:"metricsConfigs"`
 }
 
 type DiskStatsConfig struct {
@@ -42,11 +48,56 @@ type HostStatsConfig struct {
 	MetricsConfigs map[string]MetricConfig `json:"metricsConfigs"`
 }
 
+type MemoryStatsConfig struct {
+	MetricsConfigs map[string]MetricConfig `json:"metricsConfigs"`
+}
+
+type OSFeatureStatsConfig struct {
+	MetricsConfigs         map[string]MetricConfig `json:"metricsConfigs"`
+	KnownModulesConfigPath string                  `json:"knownModulesConfigPath"`
+}
+
+// In order to marshal/unmarshal regexp, we need to implement
+// MarshalText/UnmarshalText methods in a wrapper struct
+type NetStatsInterfaceRegexp struct {
+	R *regexp.Regexp
+}
+
+func (r *NetStatsInterfaceRegexp) UnmarshalText(data []byte) error {
+	// We don't build Regexp if data is empty
+	if len(data) == 0 {
+		return nil
+	}
+	regex, err := regexp.Compile(string(data))
+	if err != nil {
+		return err
+	}
+	r.R = regex
+	return nil
+}
+
+func (r NetStatsInterfaceRegexp) MarshalText() ([]byte, error) {
+	if r.R == nil {
+		return nil, nil
+	}
+	return []byte(r.R.String()), nil
+}
+
+type NetStatsConfig struct {
+	MetricsConfigs         map[string]MetricConfig `json:"metricsConfigs"`
+	ExcludeInterfaceRegexp NetStatsInterfaceRegexp `json:"excludeInterfaceRegexp"`
+}
+
 type SystemStatsConfig struct {
-	DiskConfig           DiskStatsConfig `json:"disk"`
-	HostConfig           HostStatsConfig `json:"host"`
-	InvokeIntervalString string          `json:"invokeInterval"`
-	InvokeInterval       time.Duration   `json:"-"`
+	CPUConfig            CPUStatsConfig       `json:"cpu"`
+	DiskConfig           DiskStatsConfig      `json:"disk"`
+	HostConfig           HostStatsConfig      `json:"host"`
+	MemoryConfig         MemoryStatsConfig    `json:"memory"`
+	OsFeatureConfig      OSFeatureStatsConfig `json:"osFeature"`
+	NetConfig            NetStatsConfig       `json:"net"`
+	InvokeIntervalString string               `json:"invokeInterval"`
+	InvokeInterval       time.Duration        `json:"-"`
+	ProcPath             string               `json:"procPath"`
 }
 
 // ApplyConfiguration applies default configurations.
@@ -54,8 +105,14 @@ func (ssc *SystemStatsConfig) ApplyConfiguration() error {
 	if ssc.InvokeIntervalString == "" {
 		ssc.InvokeIntervalString = defaultInvokeIntervalString
 	}
+	if ssc.ProcPath == "" {
+		ssc.ProcPath = defaultProcPath
+	}
 	if ssc.DiskConfig.LsblkTimeoutString == "" {
 		ssc.DiskConfig.LsblkTimeoutString = defaultlsblkTimeoutString
+	}
+	if ssc.OsFeatureConfig.KnownModulesConfigPath == "" {
+		ssc.OsFeatureConfig.KnownModulesConfigPath = defaultKnownModulesConfigPath
 	}
 
 	var err error
@@ -75,6 +132,9 @@ func (ssc *SystemStatsConfig) ApplyConfiguration() error {
 func (ssc *SystemStatsConfig) Validate() error {
 	if ssc.InvokeInterval <= time.Duration(0) {
 		return fmt.Errorf("InvokeInterval %v must be above 0s", ssc.InvokeInterval)
+	}
+	if err := ssc.validateProcPath(); err != nil {
+		return fmt.Errorf("ProcPath %v check failed: %s", ssc.ProcPath, err)
 	}
 	if ssc.DiskConfig.LsblkTimeout <= time.Duration(0) {
 		return fmt.Errorf("LsblkTimeout %v must be above 0s", ssc.DiskConfig.LsblkTimeout)

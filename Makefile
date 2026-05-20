@@ -14,20 +14,31 @@
 
 # Build the node-problem-detector image.
 
-.PHONY: all build-container build-tar build push-container push-tar push \
-        clean vet fmt version \
-        Dockerfile build-binaries docker-builder build-in-docker
+.PHONY: all \
+        lint vet fmt version test e2e-test \
+        build-binaries build-container build-tar build \
+        docker-builder build-in-docker \
+        push-container push-tar push release clean depup \
+        print-tar-sha-md5
 
 all: build
 
-# VERSION is the version of the binary.
-VERSION?=$(shell if [ -d .git ]; then echo `git describe --tags --dirty`; else echo "UNKNOWN"; fi)
+# PLATFORMS is the set of OS_ARCH that NPD can build against.
+LINUX_PLATFORMS=linux_amd64 linux_arm64
+DOCKER_PLATFORMS=linux/amd64
+PLATFORMS=$(LINUX_PLATFORMS) windows_amd64
+
+# BRANCH is the git branch.
+BRANCH=$(shell git symbolic-ref --short HEAD)
+
+# VERSION is the git version of the binary.
+VERSION?=$(shell git describe --tags --always --dirty)
 
 # TAG is the tag of the container image, default to binary version.
 TAG?=$(VERSION)
 
 # REGISTRY is the container registry to push into.
-REGISTRY?=staging-k8s.gcr.io
+REGISTRY?=syseleven
 
 # UPLOAD_PATH is the cloud storage path to upload release tar.
 UPLOAD_PATH?=gs://kubernetes-release
@@ -38,100 +49,276 @@ UPLOAD_PATH:=$(shell echo $(UPLOAD_PATH) | sed '$$s/\/*$$//')
 PKG:=k8s.io/node-problem-detector
 
 # PKG_SOURCES are all the go source code.
+ifeq ($(OS),Windows_NT)
+PKG_SOURCES:=
+# TODO: File change detection does not work in Windows.
+else
 PKG_SOURCES:=$(shell find pkg cmd -name '*.go')
+endif
 
+# PARALLEL specifies the number of parallel test nodes to run for e2e tests.
+PARALLEL?=3
+
+NPD_NAME_VERSION?=node-problem-detector-$(VERSION)
 # TARBALL is the name of release tar. Include binary version by default.
-TARBALL?=node-problem-detector-$(VERSION).tar.gz
+TARBALL=$(NPD_NAME_VERSION).tar.gz
 
-# IMAGE is the image name of the node problem detector container image.
-IMAGE:=$(REGISTRY)/node-problem-detector:$(TAG)
+# IMAGE_TAGS contains the image tags of the node problem detector container image.
+IMAGE_TAGS=--tag $(REGISTRY)/node-problem-detector:$(TAG)
+IMAGE_TAGS_WINDOWS=--tag $(REGISTRY)/node-problem-detector-windows:$(TAG)
+ifeq ($(REGISTRY), gcr.io/k8s-staging-npd)
+ifeq (,$(findstring heads,$(BRANCH)))
+  IMAGE_TAGS+= --tag $(REGISTRY)/node-problem-detector:$(BRANCH)
+  IMAGE_TAGS_WINDOWS+= --tag $(REGISTRY)/node-problem-detector-windows:$(BRANCH)
+endif
+endif
 
 # ENABLE_JOURNALD enables build journald support or not. Building journald
 # support needs libsystemd-dev or libsystemd-journal-dev.
 ENABLE_JOURNALD?=1
 
-# TODO(random-liu): Support different architectures.
-# The debian-base:v1.0.0 image built from kubernetes repository is based on
-# Debian Stretch. It includes systemd 232 with support for both +XZ and +LZ4
-# compression. +LZ4 is needed on some os distros such as COS.
-BASEIMAGE:=k8s.gcr.io/debian-base-amd64:v1.0.0
+ifeq ($(shell go env GOHOSTOS), darwin)
+ENABLE_JOURNALD=0
+else ifeq ($(shell go env GOHOSTOS), windows)
+ENABLE_JOURNALD=0
+endif
 
 # Disable cgo by default to make the binary statically linked.
 CGO_ENABLED:=0
 
+ifeq ($(GOARCH), arm64)
+	CC:=aarch64-linux-gnu-gcc
+else
+	CC:=x86_64-linux-gnu-gcc
+endif
+
+# Set default Go architecture to AMD64.
+GOARCH ?= amd64
+
 # Construct the "-tags" parameter used by "go build".
-BUILD_TAGS?=""
+BUILD_TAGS?=
+
+LINUX_BUILD_TAGS = $(BUILD_TAGS)
+WINDOWS_BUILD_TAGS = $(BUILD_TAGS)
+
+ifeq ($(OS),Windows_NT)
+HOST_PLATFORM_BUILD_TAGS = $(WINDOWS_BUILD_TAGS)
+else
+HOST_PLATFORM_BUILD_TAGS = $(LINUX_BUILD_TAGS)
+endif
+
 ifeq ($(ENABLE_JOURNALD), 1)
 	# Enable journald build tag.
-	BUILD_TAGS:=$(BUILD_TAGS) journald
+	LINUX_BUILD_TAGS := journald $(BUILD_TAGS)
 	# Enable cgo because sdjournal needs cgo to compile. The binary will be
 	# dynamically linked if CGO_ENABLED is enabled. This is fine because fedora
 	# already has necessary dynamic library. We can not use `-extldflags "-static"`
 	# here, because go-systemd uses dlopen, and dlopen will not work properly in a
 	# statically linked application.
 	CGO_ENABLED:=1
+	LOGCOUNTER=./bin/log-counter
+else
+	# Hack: Don't copy over log-counter, use a wildcard path that shouldn't match
+	# anything in COPY command.
+	LOGCOUNTER=*dont-include-log-counter
 endif
-ifneq ($(BUILD_TAGS), "")
-	BUILD_TAGS:=-tags "$(BUILD_TAGS)"
-endif
+
+GOLANGCI_LINT_VERSION := v2.11.4
+GOLANGCI_LINT := ./.bin/golangci-lint
+
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run --config .golangci.yml ./...
+
+$(GOLANGCI_LINT):
+	@echo "golangci-lint not found, downloading..."
+	@mkdir -p ./.bin
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b ./.bin $(GOLANGCI_LINT_VERSION)
+
 
 vet:
-	GO111MODULE=on go list -mod vendor $(BUILD_TAGS) ./... | \
+	go list -tags "$(HOST_PLATFORM_BUILD_TAGS)" ./... | \
 		grep -v "./vendor/*" | \
-		GO111MODULE=on xargs go vet -mod vendor $(BUILD_TAGS)
+		xargs go vet -tags "$(HOST_PLATFORM_BUILD_TAGS)"
 
-fmt:
+fmt: $(GOLANGCI_LINT)
 	find . -type f -name "*.go" | grep -v "./vendor/*" | xargs gofmt -s -w -l
+	$(GOLANGCI_LINT) run --config .golangci.yml --fix ./...
 
 version:
 	@echo $(VERSION)
 
+BINARIES = bin/node-problem-detector bin/health-checker test/bin/problem-maker
+BINARIES_LINUX_ONLY =
+ifeq ($(ENABLE_JOURNALD), 1)
+	BINARIES_LINUX_ONLY += bin/log-counter
+endif
+
+ALL_BINARIES = $(foreach binary, $(BINARIES) $(BINARIES_LINUX_ONLY), ./$(binary)) \
+  $(foreach platform, $(LINUX_PLATFORMS), $(foreach binary, $(BINARIES) $(BINARIES_LINUX_ONLY), output/$(platform)/$(binary))) \
+  $(foreach binary, $(BINARIES), output/windows_amd64/$(binary).exe)
+ALL_TARBALLS = $(foreach platform, $(PLATFORMS), $(NPD_NAME_VERSION)-$(platform).tar.gz)
+
+output/windows_amd64/bin/%.exe: $(PKG_SOURCES)
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build \
+		-o $@ \
+		-ldflags '-X $(PKG)/pkg/version.version=$(VERSION)' \
+		-tags "$(WINDOWS_BUILD_TAGS)" \
+		./cmd/$(subst -,,$*)
+	touch $@
+
+output/windows_amd64/test/bin/%.exe: $(PKG_SOURCES)
+	cd test && \
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build \
+		-o ../$@ \
+		-tags "$(WINDOWS_BUILD_TAGS)" \
+		./e2e/$(subst -,,$*)
+
+output/linux_amd64/bin/%: $(PKG_SOURCES)
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) \
+	  CC=x86_64-linux-gnu-gcc go build \
+		-o $@ \
+		-ldflags '-X $(PKG)/pkg/version.version=$(VERSION)' \
+		-tags "$(LINUX_BUILD_TAGS)" \
+		./cmd/$(subst -,,$*)
+	touch $@
+
+output/linux_amd64/test/bin/%: $(PKG_SOURCES)
+	cd test && \
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) \
+	  CC=x86_64-linux-gnu-gcc go build \
+		-o ../$@ \
+		-tags "$(LINUX_BUILD_TAGS)" \
+		./e2e/$(subst -,,$*)
+
+output/linux_arm64/bin/%: $(PKG_SOURCES)
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=$(CGO_ENABLED) \
+	  CC=aarch64-linux-gnu-gcc go build \
+		-o $@ \
+		-ldflags '-X $(PKG)/pkg/version.version=$(VERSION)' \
+		-tags "$(LINUX_BUILD_TAGS)" \
+		./cmd/$(subst -,,$*)
+	touch $@
+
+output/linux_arm64/test/bin/%: $(PKG_SOURCES)
+	cd test && \
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=$(CGO_ENABLED) \
+	  CC=aarch64-linux-gnu-gcc go build \
+		-o ../$@ \
+		-tags "$(LINUX_BUILD_TAGS)" \
+		./e2e/$(subst -,,$*)
+
+# In the future these targets should be deprecated.
 ./bin/log-counter: $(PKG_SOURCES)
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GO111MODULE=on go build \
-		-mod vendor \
+ifeq ($(ENABLE_JOURNALD), 1)
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=$(GOARCH) CC=$(CC) go build \
 		-o bin/log-counter \
 		-ldflags '-X $(PKG)/pkg/version.version=$(VERSION)' \
-		$(BUILD_TAGS) \
+		-tags "$(LINUX_BUILD_TAGS)" \
 		cmd/logcounter/log_counter.go
+else
+	echo "Warning: log-counter requires journald, skipping."
+endif
 
-./bin/node-problem-detector: $(PKG_SOURCES)
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GO111MODULE=on go build \
-		-mod vendor \
-		-o bin/node-problem-detector \
+./bin/node-problem-detector.exe: $(PKG_SOURCES)
+	CGO_ENABLED=0 GOOS=windows GOARCH=$(GOARCH) go build \
+		-o bin/node-problem-detector.exe \
 		-ldflags '-X $(PKG)/pkg/version.version=$(VERSION)' \
-		$(BUILD_TAGS) \
 		./cmd/nodeproblemdetector
 
-Dockerfile: Dockerfile.in
-	sed -e 's|@BASEIMAGE@|$(BASEIMAGE)|g' $< >$@
+./bin/node-problem-detector: $(PKG_SOURCES)
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=$(GOARCH) CC=$(CC) go build \
+		-o bin/node-problem-detector \
+		-ldflags '-X $(PKG)/pkg/version.version=$(VERSION)' \
+		-tags "$(LINUX_BUILD_TAGS)" \
+		./cmd/nodeproblemdetector
+
+./test/bin/problem-maker: $(PKG_SOURCES)
+	cd test && \
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=$(GOARCH) CC=$(CC) go build \
+		-o bin/problem-maker \
+		-tags "$(LINUX_BUILD_TAGS)" \
+		./e2e/problemmaker/problem_maker.go
+
+./bin/health-checker: $(PKG_SOURCES)
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=$(GOARCH) CC=$(CC) go build \
+		-o bin/health-checker \
+		-ldflags '-X $(PKG)/pkg/version.version=$(VERSION)' \
+		-tags "$(LINUX_BUILD_TAGS)" \
+		cmd/healthchecker/health_checker.go
+
+./bin/health-checker.exe: $(PKG_SOURCES)
+	CGO_ENABLED=0 GOOS=windows GOARCH=$(GOARCH) go build \
+		-o bin/health-checker.exe \
+		-ldflags '-X $(PKG)/pkg/version.version=$(VERSION)' \
+		cmd/healthchecker/health_checker.go
 
 test: vet fmt
-	GO111MODULE=on go test -mod vendor -timeout=1m -v -race -short $(BUILD_TAGS) ./...
+	go test -timeout=1m -v -race -short -tags "$(HOST_PLATFORM_BUILD_TAGS)" ./...
 
 e2e-test: vet fmt build-tar
-	GO111MODULE=on go test -mod vendor -timeout=10m -v $(BUILD_TAGS) \
-	./test/e2e/metriconly/... \
+	cd test && \
+	go run github.com/onsi/ginkgo/ginkgo -nodes=$(PARALLEL) -timeout=10m -v -tags "$(HOST_PLATFORM_BUILD_TAGS)" -stream \
+	./e2e/metriconly/... -- \
 	-project=$(PROJECT) -zone=$(ZONE) \
 	-image=$(VM_IMAGE) -image-family=$(IMAGE_FAMILY) -image-project=$(IMAGE_PROJECT) \
 	-ssh-user=$(SSH_USER) -ssh-key=$(SSH_KEY) \
-	-npd-build-tar=`pwd`/$(TARBALL) \
+	-npd-build-tar=`pwd`/../$(TARBALL) \
 	-boskos-project-type=$(BOSKOS_PROJECT_TYPE) -job-name=$(JOB_NAME) \
 	-artifacts-dir=$(ARTIFACTS)
 
-build-binaries: ./bin/node-problem-detector ./bin/log-counter
+$(NPD_NAME_VERSION)-%.tar.gz: $(ALL_BINARIES) test/e2e-install.sh
+	mkdir -p output/$*/ output/$*/test/
+	cp -r config/ output/$*/
+	cp test/e2e-install.sh output/$*/test/e2e-install.sh
+	(cd output/$*/ && tar -zcvf ../../$@ *)
+	sha512sum $@ > $@.sha512
 
-build-container: build-binaries Dockerfile
-	docker build -t $(IMAGE) .
+image-$(NPD_NAME_VERSION)-linux_%.tar.gz: output/linux_%/test/bin/problem-maker test/e2e-install.sh
+	mkdir -p output/linux_$*/bin output/linux_$*/test
+	docker create --name npd-$* --platform linux/$* registry.k8s.io/node-problem-detector/node-problem-detector:$(TAG)
+	docker cp npd-$*:/node-problem-detector output/linux_$*/bin/
+	docker cp npd-$*:/home/kubernetes/bin/health-checker output/linux_$*/bin/
+	docker cp npd-$*:/home/kubernetes/bin/log-counter output/linux_$*/bin/
+	docker cp npd-$*:/config output/linux_$*/
+	docker rm -v npd-$*
+	cp test/e2e-install.sh output/linux_$*/test/e2e-install.sh
+	(cd output/linux_$*/ && tar -zcvf ../../$@ *)
+	cp $@ $(NPD_NAME_VERSION)-linux_$*.tar.gz
+	sha512sum $(NPD_NAME_VERSION)-linux_$*.tar.gz > $(NPD_NAME_VERSION)-linux_$*.tar.gz.sha512
 
-build-tar: ./bin/node-problem-detector ./bin/log-counter
-	tar -zcvf $(TARBALL) bin/ config/ test/e2e-install.sh
+image-$(NPD_NAME_VERSION)-windows_%.tar.gz: output/windows_%/test/bin/problem-maker.exe test/e2e-install.sh
+	mkdir -p output/windows_$*/bin output/windows_$*/test/
+	docker create --name npd-$* --platform windows/$* registry.k8s.io/node-problem-detector/node-problem-detector-windows:$(TAG)
+	docker cp npd-$*:/Files/node-problem-detector.exe output/windows_$*/bin/
+	docker cp npd-$*:/Files/etc/kubernetes/node/bin/health-checker.exe output/windows_$*/bin/
+	docker cp npd-$*:/Files/config output/windows_$*/
+	docker rm -v npd-$*
+	cp test/e2e-install.sh output/windows_$*/test/e2e-install.sh
+	(cd output/windows_$*/ && tar -zcvf ../../$@ *)
+	cp $@ $(NPD_NAME_VERSION)-windows_$*.tar.gz
+	sha512sum $(NPD_NAME_VERSION)-windows_$*.tar.gz > $(NPD_NAME_VERSION)-windows_$*.tar.gz.sha512
+
+build-binaries: $(ALL_BINARIES)
+
+build-container: clean Dockerfile
+	docker buildx create --platform $(DOCKER_PLATFORMS) --use
+	docker buildx build --platform $(DOCKER_PLATFORMS) $(IMAGE_TAGS) --build-arg LOGCOUNTER=$(LOGCOUNTER) .
+
+build-container-windows: clean Dockerfile.windows
+	docker buildx create --platform windows/amd64 --use
+	docker buildx build --platform windows/amd64 $(IMAGE_TAGS_WINDOWS) -f Dockerfile.windows .
+
+$(TARBALL): ./bin/node-problem-detector ./bin/log-counter ./bin/health-checker ./test/bin/problem-maker
+	tar -zcvf $(TARBALL) bin/ config/ test/e2e-install.sh test/bin/problem-maker
 	sha1sum $(TARBALL)
 	md5sum $(TARBALL)
+
+build-tar: $(TARBALL) $(ALL_TARBALLS)
 
 build: build-container build-tar
 
 docker-builder:
-	docker build -t npd-builder ./builder
+	docker build -t npd-builder . --target=builder
 
 build-in-docker: clean docker-builder
 	docker run \
@@ -139,19 +326,54 @@ build-in-docker: clean docker-builder
 		-c 'cd /gopath/src/k8s.io/node-problem-detector/ && make build-binaries'
 
 push-container: build-container
-	gcloud auth configure-docker
-	docker push $(IMAGE)
+	# Build should be cached from build-container
+	docker buildx build --push --platform $(DOCKER_PLATFORMS) $(IMAGE_TAGS) --build-arg LOGCOUNTER=$(LOGCOUNTER) .
+
+push-container-windows: build-container-windows
+	# Build should be cached from build-container
+	docker buildx build --push --platform windows/amd64 $(IMAGE_TAGS_WINDOWS) -f Dockerfile.windows .
 
 push-tar: build-tar
 	gsutil cp $(TARBALL) $(UPLOAD_PATH)/node-problem-detector/
-
-push: push-container push-tar
+	gsutil cp node-problem-detector-$(VERSION)-*.tar.gz* $(UPLOAD_PATH)/node-problem-detector/
 
 ci-push-image:
 	echo "$$DOCKER_PASSWORD" | docker login -u "$$DOCKER_USERNAME" --password-stdin
-	docker push $(IMAGE)
+	docker build $(IMAGE_TAGS) --build-arg LOGCOUNTER=$(LOGCOUNTER) .
+	docker push $(REGISTRY)/node-problem-detector:$(TAG)
+
+# `make push` is used by presubmit and CI jobs.
+push: push-container push-tar
+
+# `make release` is used when releasing a new NPD version.
+release: push-container build-tar print-tar-sha-md5
+
+# `make release-new` is experimentally used when releasing a new NPD version.
+release-new: image-$(NPD_NAME_VERSION)-linux_amd64.tar.gz image-$(NPD_NAME_VERSION)-linux_arm64.tar.gz image-$(NPD_NAME_VERSION)-windows_amd64.tar.gz print-tar-sha-md5
+
+print-tar-sha-md5:
+	./hack/print-tar-sha-md5.sh $(VERSION)
+
+coverage.out:
+	rm -f coverage.out
+	go test -coverprofile=coverage.out -timeout=1m -v -short ./...
 
 clean:
-	rm -f bin/log-counter
-	rm -f bin/node-problem-detector
-	rm -f node-problem-detector-*.tar.gz
+	rm -rf bin/
+	rm -rf test/bin/
+	rm -f node-problem-detector-*.tar.gz*
+	rm -rf output/
+	rm -f coverage.out
+
+.PHONY: gomod
+gomod:
+	go mod tidy
+	go mod vendor
+	cd test; go mod tidy
+
+.PHONY: goget
+goget:
+	go get $(shell go list -f '{{if not (or .Main .Indirect)}}{{.Path}}{{end}}' -mod=mod -m all)
+
+.PHONY: depup
+depup: goget gomod

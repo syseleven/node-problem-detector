@@ -19,10 +19,9 @@ package options
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
-
-	"net/url"
 
 	"github.com/spf13/pflag"
 
@@ -43,12 +42,18 @@ type NodeProblemDetectorOptions struct {
 	ServerPort int
 	// ServerAddress is the address to bind the node problem detector server.
 	ServerAddress string
+	// QPS is the maximum QPS to the master from client.
+	QPS float32
+	// Burst is the maximum burst for throttle.
+	Burst int
 
 	// exporter options
 
 	// k8sExporter options
 	// EnableK8sExporter is the flag determining whether to report to Kubernetes.
 	EnableK8sExporter bool
+	// EventNamespace is the namespace events are written to
+	EventNamespace string
 	// ApiServerOverride is the custom URI used to connect to Kubernetes ApiServer.
 	ApiServerOverride string
 	// APIServerWaitTimeout is the timeout on waiting for kube-apiserver to be
@@ -59,6 +64,10 @@ type NodeProblemDetectorOptions struct {
 	APIServerWaitInterval time.Duration
 	// K8sExporterHeartbeatPeriod is the period at which the k8s exporter does forcibly sync with apiserver.
 	K8sExporterHeartbeatPeriod time.Duration
+	// K8sExporterWriteEvents determines whether to write Kubernetes Events for problems.
+	K8sExporterWriteEvents bool
+	// K8sExporterUpdateNodeConditions determines whether to update Kubernetes Node Conditions for problems.
+	K8sExporterUpdateNodeConditions bool
 
 	// prometheusExporter options
 	// PrometheusServerPort is the port to bind the Prometheus scrape endpoint. Use 0 to disable.
@@ -97,19 +106,26 @@ func NewNodeProblemDetectorOptions() *NodeProblemDetectorOptions {
 }
 
 // AddFlags adds node problem detector command line options to pflag.
-func (npdo *NodeProblemDetectorOptions) AddFlags(fs *pflag.FlagSet) {
+func (npdo *NodeProblemDetectorOptions) AddFlags(fs *pflag.FlagSet) error {
 	fs.StringSliceVar(&npdo.SystemLogMonitorConfigPaths, "system-log-monitors",
 		[]string{}, "List of paths to system log monitor config files, comma separated.")
-	fs.MarkDeprecated("system-log-monitors", "replaced by --config.system-log-monitor. NPD will panic if both --system-log-monitors and --config.system-log-monitor are set.")
+	if err := fs.MarkDeprecated("system-log-monitors", "replaced by --config.system-log-monitor. NPD will panic if both --system-log-monitors and --config.system-log-monitor are set."); err != nil {
+		return fmt.Errorf("failed to mark 'system-log-monitors' as deprecated: %w", err)
+	}
 	fs.StringSliceVar(&npdo.CustomPluginMonitorConfigPaths, "custom-plugin-monitors",
 		[]string{}, "List of paths to custom plugin monitor config files, comma separated.")
-	fs.MarkDeprecated("custom-plugin-monitors", "replaced by --config.custom-plugin-monitor. NPD will panic if both --custom-plugin-monitors and --config.custom-plugin-monitor are set.")
+	if err := fs.MarkDeprecated("custom-plugin-monitors", "replaced by --config.custom-plugin-monitor. NPD will panic if both --custom-plugin-monitors and --config.custom-plugin-monitor are set."); err != nil {
+		return fmt.Errorf("failed to mark 'custom-plugin-monitors' as deprecated: %w", err)
+	}
 	fs.BoolVar(&npdo.EnableK8sExporter, "enable-k8s-exporter", true, "Enables reporting to Kubernetes API server.")
+	fs.StringVar(&npdo.EventNamespace, "event-namespace", "", "Namespace for recorded Kubernetes events.")
 	fs.StringVar(&npdo.ApiServerOverride, "apiserver-override",
 		"", "Custom URI used to connect to Kubernetes ApiServer. This is ignored if --enable-k8s-exporter is false.")
 	fs.DurationVar(&npdo.APIServerWaitTimeout, "apiserver-wait-timeout", time.Duration(5)*time.Minute, "The timeout on waiting for kube-apiserver to be ready. This is ignored if --enable-k8s-exporter is false.")
 	fs.DurationVar(&npdo.APIServerWaitInterval, "apiserver-wait-interval", time.Duration(5)*time.Second, "The interval between the checks on the readiness of kube-apiserver. This is ignored if --enable-k8s-exporter is false.")
 	fs.DurationVar(&npdo.K8sExporterHeartbeatPeriod, "k8s-exporter-heartbeat-period", 5*time.Minute, "The period at which k8s-exporter does forcibly sync with apiserver.")
+	fs.BoolVar(&npdo.K8sExporterWriteEvents, "k8s-exporter-write-events", true, "Whether to write Kubernetes Event objects with event details.")
+	fs.BoolVar(&npdo.K8sExporterUpdateNodeConditions, "k8s-exporter-update-node-conditions", true, "Whether to update Kubernetes Node conditions with event details.")
 	fs.BoolVar(&npdo.PrintVersion, "version", false, "Print version information and quit")
 	fs.StringVar(&npdo.HostnameOverride, "hostname-override",
 		"", "Custom node name used to override hostname")
@@ -122,7 +138,8 @@ func (npdo *NodeProblemDetectorOptions) AddFlags(fs *pflag.FlagSet) {
 		20257, "The port to bind the Prometheus scrape endpoint. Prometheus exporter is enabled by default at port 20257. Use 0 to disable.")
 	fs.StringVar(&npdo.PrometheusServerAddress, "prometheus-address",
 		"127.0.0.1", "The address to bind the Prometheus scrape endpoint.")
-
+	fs.Float32Var(&npdo.QPS, "kube-api-qps", 500, "Maximum QPS to use while talking with Kubernetes API")
+	fs.IntVar(&npdo.Burst, "kube-api-burst", 500, "Maximum burst for throttle while talking with Kubernetes API")
 	for _, exporterName := range exporters.GetExporterNames() {
 		exporterHandler := exporters.GetExporterHandlerOrDie(exporterName)
 		exporterHandler.Options.SetFlags(fs)
@@ -136,6 +153,7 @@ func (npdo *NodeProblemDetectorOptions) AddFlags(fs *pflag.FlagSet) {
 				problemDaemonName,
 				problemdaemon.GetProblemDaemonHandlerOrDie(problemDaemonName).CmdOptionDescription))
 	}
+	return nil
 }
 
 // ValidOrDie validates node problem detector command line options.

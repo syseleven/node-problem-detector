@@ -22,7 +22,7 @@ set -o nounset
 set -o pipefail
 
 
-NPD_STAGING_PATH=${NPD_STAGING_PATH:-"gs://node-problem-detector-staging"}
+NPD_STAGING_PATH=${NPD_STAGING_PATH:-"gs://k8s-staging-npd"}
 NPD_STAGING_REGISTRY=${NPD_STAGING_REGISTRY:-"gcr.io/node-problem-detector-staging"}
 PR_ENV_FILENAME=${PR_ENV_FILENAME:-"pr.env"}
 CI_ENV_FILENAME=${CI_ENV_FILENAME:-"ci.env"}
@@ -43,7 +43,7 @@ function print-help() {
   echo "  pr             Build node-problem-detector for presubmit jobs and push to staging. Flag -p is required."
   echo "  ci             Build node-problem-detector for CI jobs and push to staging."
   echo "  get-ci-env     Download environment variable file from staging for CI job."
-  echo "  install-lib    Install the libraries needed."
+  echo "  install-lib    Install the required libraries and tools for presubmit and CI jobs."
   echo
   echo "Examples:"
   echo "  build.sh help"
@@ -65,7 +65,7 @@ function get-version() {
 
 function install-lib() {
   apt-get update
-  apt-get install -y libsystemd-dev
+  apt-get install -y libsystemd-dev gcc-aarch64-linux-gnu
 }
 
 function write-env-file() {
@@ -79,7 +79,7 @@ function write-env-file() {
 export KUBE_ENABLE_NODE_PROBLEM_DETECTOR=standalone
 export NODE_PROBLEM_DETECTOR_RELEASE_PATH=${UPLOAD_PATH/gs:\/\//${GCS_URL_PREFIX}}
 export NODE_PROBLEM_DETECTOR_VERSION=${VERSION}
-export NODE_PROBLEM_DETECTOR_TAR_HASH=$(sha1sum ${ROOT_PATH}/node-problem-detector-${VERSION}.tar.gz | cut -d ' ' -f1)
+export NODE_PROBLEM_DETECTOR_TAR_HASH=$(sha1sum ${ROOT_PATH}/node-problem-detector-${VERSION}-linux_amd64.tar.gz | cut -d ' ' -f1)
 export EXTRA_ENVS=NODE_PROBLEM_DETECTOR_IMAGE=${REGISTRY}/node-problem-detector:${TAG}
 EOF
 
@@ -97,6 +97,7 @@ function build-npd-custom-flags() {
   local -r kube_home="/home/kubernetes"
 
   local -r km_config="${kube_home}/node-problem-detector/config/kernel-monitor.json"
+  local -r rm_config="${kube_home}/node-problem-detector/config/readonly-monitor.json"
   local -r dm_config="${kube_home}/node-problem-detector/config/docker-monitor.json"
   local -r sm_config="${kube_home}/node-problem-detector/config/systemd-monitor.json"
 
@@ -105,7 +106,7 @@ function build-npd-custom-flags() {
 
   flags="--v=2"
   flags+=" --logtostderr"
-  flags+=" --config.system-log-monitor=${km_config},${dm_config},${sm_config}"
+  flags+=" --config.system-log-monitor=${km_config},${rm_config},${dm_config},${sm_config}"
   flags+=" --config.custom-plugin-monitor=${custom_km_config},${custom_sm_config}"
   flags+=" --port=20256"
 
@@ -128,7 +129,7 @@ function build-pr() {
   export REGISTRY="${NPD_STAGING_REGISTRY}/pr/${PR}"
   export VERSION=$(get-version)
   export TAG="${VERSION}"
-  make push
+  make push-tar
   write-env-file ${PR_ENV_FILENAME}
 }
 
@@ -138,7 +139,10 @@ function build-ci() {
   export REGISTRY="${NPD_STAGING_REGISTRY}/ci"
   export VERSION="$(get-version)-$(date +%Y%m%d.%H%M)"
   export TAG="${VERSION}"
-  make push
+  # e2e tests consume the tarball, not the container
+  # this is simpler to manage in the infra, and we still ensure the container
+  # build works locally
+  make push-tar build-container
 
   # Create the env file with and without custom flags at the same time.
   build-npd-custom-flags

@@ -1,4 +1,4 @@
-// +build !disable_system_stats_monitor
+//go:build !disable_system_stats_monitor
 
 /*
 Copyright 2019 The Kubernetes Authors All rights reserved.

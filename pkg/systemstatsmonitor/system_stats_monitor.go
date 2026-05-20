@@ -18,10 +18,11 @@ package systemstatsmonitor
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"os"
+	"path/filepath"
 	"time"
 
-	"github.com/golang/glog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/node-problem-detector/pkg/problemdaemon"
 	ssmtypes "k8s.io/node-problem-detector/pkg/systemstatsmonitor/types"
@@ -34,15 +35,20 @@ const SystemStatsMonitorName = "system-stats-monitor"
 func init() {
 	problemdaemon.Register(SystemStatsMonitorName, types.ProblemDaemonHandler{
 		CreateProblemDaemonOrDie: NewSystemStatsMonitorOrDie,
-		CmdOptionDescription:     "Set to config file paths."})
+		CmdOptionDescription:     "Set to config file paths.",
+	})
 }
 
 type systemStatsMonitor struct {
-	configPath    string
-	config        ssmtypes.SystemStatsConfig
-	diskCollector *diskCollector
-	hostCollector *hostCollector
-	tomb          *tomb.Tomb
+	configPath         string
+	config             ssmtypes.SystemStatsConfig
+	cpuCollector       *cpuCollector
+	diskCollector      *diskCollector
+	hostCollector      *hostCollector
+	memoryCollector    *memoryCollector
+	netCollector       *netCollector
+	osFeatureCollector *osFeatureCollector
+	tomb               *tomb.Tomb
 }
 
 // NewSystemStatsMonitorOrDie creates a system stats monitor.
@@ -53,36 +59,54 @@ func NewSystemStatsMonitorOrDie(configPath string) types.Monitor {
 	}
 
 	// Apply configurations.
-	f, err := ioutil.ReadFile(configPath)
+	f, err := os.ReadFile(configPath)
 	if err != nil {
-		glog.Fatalf("Failed to read configuration file %q: %v", configPath, err)
+		klog.Fatalf("Failed to read configuration file %q: %v", configPath, err)
 	}
 	err = json.Unmarshal(f, &ssm.config)
 	if err != nil {
-		glog.Fatalf("Failed to unmarshal configuration file %q: %v", configPath, err)
+		klog.Fatalf("Failed to unmarshal configuration file %q: %v", configPath, err)
 	}
 
 	err = ssm.config.ApplyConfiguration()
 	if err != nil {
-		glog.Fatalf("Failed to apply configuration for %q: %v", configPath, err)
+		klog.Fatalf("Failed to apply configuration for %q: %v", configPath, err)
 	}
 
 	err = ssm.config.Validate()
 	if err != nil {
-		glog.Fatalf("Failed to validate %s configuration %+v: %v", ssm.configPath, ssm.config, err)
+		klog.Fatalf("Failed to validate %s configuration %+v: %v", ssm.configPath, ssm.config, err)
 	}
 
+	if len(ssm.config.CPUConfig.MetricsConfigs) > 0 {
+		ssm.cpuCollector = NewCPUCollectorOrDie(&ssm.config.CPUConfig, ssm.config.ProcPath)
+	}
 	if len(ssm.config.DiskConfig.MetricsConfigs) > 0 {
 		ssm.diskCollector = NewDiskCollectorOrDie(&ssm.config.DiskConfig)
 	}
 	if len(ssm.config.HostConfig.MetricsConfigs) > 0 {
 		ssm.hostCollector = NewHostCollectorOrDie(&ssm.config.HostConfig)
 	}
+	if len(ssm.config.MemoryConfig.MetricsConfigs) > 0 {
+		ssm.memoryCollector = NewMemoryCollectorOrDie(&ssm.config.MemoryConfig)
+	}
+	if len(ssm.config.OsFeatureConfig.MetricsConfigs) > 0 {
+		// update the KnownModulesConfigPath to relative the system-stats-monitors path
+		// only when the KnownModulesConfigPath path is relative
+		if !filepath.IsAbs(ssm.config.OsFeatureConfig.KnownModulesConfigPath) {
+			ssm.config.OsFeatureConfig.KnownModulesConfigPath = filepath.Join(filepath.Dir(configPath),
+				ssm.config.OsFeatureConfig.KnownModulesConfigPath)
+		}
+		ssm.osFeatureCollector = NewOsFeatureCollectorOrDie(&ssm.config.OsFeatureConfig, ssm.config.ProcPath)
+	}
+	if len(ssm.config.NetConfig.MetricsConfigs) > 0 {
+		ssm.netCollector = NewNetCollectorOrDie(&ssm.config.NetConfig, ssm.config.ProcPath)
+	}
 	return &ssm
 }
 
 func (ssm *systemStatsMonitor) Start() (<-chan *types.Status, error) {
-	glog.Infof("Start system stats monitor %s", ssm.configPath)
+	klog.Infof("Start system stats monitor %s", ssm.configPath)
 	go ssm.monitorLoop()
 	return nil, nil
 }
@@ -95,26 +119,34 @@ func (ssm *systemStatsMonitor) monitorLoop() {
 
 	select {
 	case <-ssm.tomb.Stopping():
-		glog.Infof("System stats monitor stopped: %s", ssm.configPath)
+		klog.Infof("System stats monitor stopped: %s", ssm.configPath)
 		return
 	default:
+		ssm.cpuCollector.collect()
 		ssm.diskCollector.collect()
 		ssm.hostCollector.collect()
+		ssm.memoryCollector.collect()
+		ssm.osFeatureCollector.collect()
+		ssm.netCollector.collect()
 	}
 
 	for {
 		select {
 		case <-runTicker.C:
+			ssm.cpuCollector.collect()
 			ssm.diskCollector.collect()
 			ssm.hostCollector.collect()
+			ssm.memoryCollector.collect()
+			ssm.osFeatureCollector.collect()
+			ssm.netCollector.collect()
 		case <-ssm.tomb.Stopping():
-			glog.Infof("System stats monitor stopped: %s", ssm.configPath)
+			klog.Infof("System stats monitor stopped: %s", ssm.configPath)
 			return
 		}
 	}
 }
 
 func (ssm *systemStatsMonitor) Stop() {
-	glog.Infof("Stop system stats monitor %s", ssm.configPath)
+	klog.Infof("Stop system stats monitor %s", ssm.configPath)
 	ssm.tomb.Stop()
 }

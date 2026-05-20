@@ -1,0 +1,23 @@
+name: Build and Push Image
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  REGISTRY: syseleven
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and push image
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          make ci-push-image
+
