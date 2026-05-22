@@ -25,7 +25,7 @@ all: build
 
 # PLATFORMS is the set of OS_ARCH that NPD can build against.
 LINUX_PLATFORMS=linux_amd64 linux_arm64
-DOCKER_PLATFORMS=linux/amd64,linux/arm64
+DOCKER_PLATFORMS=linux/amd64
 PLATFORMS=$(LINUX_PLATFORMS) windows_amd64
 
 # BRANCH is the git branch.
@@ -38,7 +38,7 @@ VERSION?=$(shell git describe --tags --always --dirty)
 TAG?=$(VERSION)
 
 # REGISTRY is the container registry to push into.
-REGISTRY?=gcr.io/k8s-staging-npd
+REGISTRY?=syseleven
 
 # UPLOAD_PATH is the cloud storage path to upload release tar.
 UPLOAD_PATH?=gs://kubernetes-release
@@ -273,6 +273,31 @@ $(NPD_NAME_VERSION)-%.tar.gz: $(ALL_BINARIES) test/e2e-install.sh
 	(cd output/$*/ && tar -zcvf ../../$@ *)
 	sha512sum $@ > $@.sha512
 
+image-$(NPD_NAME_VERSION)-linux_%.tar.gz: output/linux_%/test/bin/problem-maker test/e2e-install.sh
+	mkdir -p output/linux_$*/bin output/linux_$*/test
+	docker create --name npd-$* --platform linux/$* registry.k8s.io/node-problem-detector/node-problem-detector:$(TAG)
+	docker cp npd-$*:/node-problem-detector output/linux_$*/bin/
+	docker cp npd-$*:/home/kubernetes/bin/health-checker output/linux_$*/bin/
+	docker cp npd-$*:/home/kubernetes/bin/log-counter output/linux_$*/bin/
+	docker cp npd-$*:/config output/linux_$*/
+	docker rm -v npd-$*
+	cp test/e2e-install.sh output/linux_$*/test/e2e-install.sh
+	(cd output/linux_$*/ && tar -zcvf ../../$@ *)
+	cp $@ $(NPD_NAME_VERSION)-linux_$*.tar.gz
+	sha512sum $(NPD_NAME_VERSION)-linux_$*.tar.gz > $(NPD_NAME_VERSION)-linux_$*.tar.gz.sha512
+
+image-$(NPD_NAME_VERSION)-windows_%.tar.gz: output/windows_%/test/bin/problem-maker.exe test/e2e-install.sh
+	mkdir -p output/windows_$*/bin output/windows_$*/test/
+	docker create --name npd-$* --platform windows/$* registry.k8s.io/node-problem-detector/node-problem-detector-windows:$(TAG)
+	docker cp npd-$*:/Files/node-problem-detector.exe output/windows_$*/bin/
+	docker cp npd-$*:/Files/etc/kubernetes/node/bin/health-checker.exe output/windows_$*/bin/
+	docker cp npd-$*:/Files/config output/windows_$*/
+	docker rm -v npd-$*
+	cp test/e2e-install.sh output/windows_$*/test/e2e-install.sh
+	(cd output/windows_$*/ && tar -zcvf ../../$@ *)
+	cp $@ $(NPD_NAME_VERSION)-windows_$*.tar.gz
+	sha512sum $(NPD_NAME_VERSION)-windows_$*.tar.gz > $(NPD_NAME_VERSION)-windows_$*.tar.gz.sha512
+
 build-binaries: $(ALL_BINARIES)
 
 build-container: clean Dockerfile
@@ -312,13 +337,21 @@ push-tar: build-tar
 	gsutil cp $(TARBALL) $(UPLOAD_PATH)/node-problem-detector/
 	gsutil cp node-problem-detector-$(VERSION)-*.tar.gz* $(UPLOAD_PATH)/node-problem-detector/
 
+ci-push-image:
+	echo "$$DOCKER_PASSWORD" | docker login -u "$$DOCKER_USERNAME" --password-stdin
+	docker build $(IMAGE_TAGS) --build-arg LOGCOUNTER=$(LOGCOUNTER) .
+	docker push $(REGISTRY)/node-problem-detector:$(TAG)
+
 # `make push` is used by presubmit and CI jobs.
 push: push-container push-tar
 
 # `make release` is used when releasing a new NPD version.
 release: push-container build-tar print-tar-sha-md5
 
-print-tar-sha-md5: build-tar
+# `make release-new` is experimentally used when releasing a new NPD version.
+release-new: image-$(NPD_NAME_VERSION)-linux_amd64.tar.gz image-$(NPD_NAME_VERSION)-linux_arm64.tar.gz image-$(NPD_NAME_VERSION)-windows_amd64.tar.gz print-tar-sha-md5
+
+print-tar-sha-md5:
 	./hack/print-tar-sha-md5.sh $(VERSION)
 
 coverage.out:
