@@ -17,25 +17,25 @@ limitations under the License.
 package condition
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
+	testclock "k8s.io/utils/clock/testing"
 
 	"k8s.io/node-problem-detector/pkg/exporters/k8sexporter/problemclient"
 	"k8s.io/node-problem-detector/pkg/types"
 	problemutil "k8s.io/node-problem-detector/pkg/util"
-
-	"k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/clock"
 )
 
 const heartbeatPeriod = 1 * time.Minute
 
-func newTestManager() (*conditionManager, *problemclient.FakeProblemClient, *clock.FakeClock) {
+func newTestManager() (*conditionManager, *problemclient.FakeProblemClient, *testclock.FakeClock) {
 	fakeClient := problemclient.NewFakeProblemClient()
-	fakeClock := clock.NewFakeClock(time.Now())
+	fakeClock := testclock.NewFakeClock(time.Now())
 	manager := NewConditionManager(fakeClient, fakeClock, heartbeatPeriod)
 	return manager.(*conditionManager), fakeClient, fakeClock
 }
@@ -53,33 +53,42 @@ func newTestCondition(condition string) types.Condition {
 func TestNeedUpdates(t *testing.T) {
 	m, _, _ := newTestManager()
 	var c types.Condition
-	for desc, test := range map[string]struct {
+	for _, testCase := range []struct {
+		name      string
 		condition string
 		update    bool
 	}{
-		"Init condition needs update": {
+		{
+			name:      "Init condition needs update",
 			condition: "TestCondition",
 			update:    true,
 		},
-		"Same condition doesn't need update": {
+		{
+			name: "Same condition doesn't need update",
 			// not set condition, the test will reuse the condition in last case.
 			update: false,
 		},
-		"Same condition with different timestamp need update": {
+		{
+			name:      "Same condition with different timestamp need update",
 			condition: "TestCondition",
 			update:    true,
 		},
-		"New condition needs update": {
+		{
+			name:      "New condition needs update",
 			condition: "TestConditionNew",
 			update:    true,
 		},
 	} {
-		if test.condition != "" {
-			c = newTestCondition(test.condition)
+		tc := testCase
+		t.Log(tc.name)
+		if tc.condition != "" {
+			// Guarantee that the time advances before creating a new condition.
+			time.Sleep(time.Nanosecond)
+			c = newTestCondition(tc.condition)
 		}
 		m.UpdateCondition(c)
-		assert.Equal(t, test.update, m.needUpdates(), desc)
-		assert.Equal(t, c, m.conditions[c.Type], desc)
+		assert.Equal(t, tc.update, m.needUpdates(), tc.name)
+		assert.Equal(t, c, m.conditions[c.Type], tc.name)
 	}
 }
 
@@ -99,7 +108,7 @@ func TestResync(t *testing.T) {
 	m, fakeClient, fakeClock := newTestManager()
 	condition := newTestCondition("TestCondition")
 	m.conditions = map[string]types.Condition{condition.Type: condition}
-	m.sync()
+	m.sync(context.Background())
 	expected := []v1.NodeCondition{problemutil.ConvertToAPICondition(condition)}
 	assert.Nil(t, fakeClient.AssertConditions(expected), "Condition should be updated via client")
 
@@ -108,7 +117,7 @@ func TestResync(t *testing.T) {
 	assert.False(t, m.needResync(), "Should not resync after resync period without resync needed")
 
 	fakeClient.InjectError("SetConditions", fmt.Errorf("injected error"))
-	m.sync()
+	m.sync(context.Background())
 
 	assert.False(t, m.needResync(), "Should not resync before resync period")
 	fakeClock.Step(resyncPeriod)
@@ -119,7 +128,7 @@ func TestHeartbeat(t *testing.T) {
 	m, fakeClient, fakeClock := newTestManager()
 	condition := newTestCondition("TestCondition")
 	m.conditions = map[string]types.Condition{condition.Type: condition}
-	m.sync()
+	m.sync(context.Background())
 	expected := []v1.NodeCondition{problemutil.ConvertToAPICondition(condition)}
 	assert.Nil(t, fakeClient.AssertConditions(expected), "Condition should be updated via client")
 

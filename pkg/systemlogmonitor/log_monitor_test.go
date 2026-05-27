@@ -25,7 +25,7 @@ import (
 
 	"k8s.io/node-problem-detector/pkg/problemdaemon"
 	"k8s.io/node-problem-detector/pkg/problemmetrics"
-	logtypes "k8s.io/node-problem-detector/pkg/systemlogmonitor/types"
+	systemlogtypes "k8s.io/node-problem-detector/pkg/systemlogmonitor/types"
 	"k8s.io/node-problem-detector/pkg/types"
 	"k8s.io/node-problem-detector/pkg/util"
 	"k8s.io/node-problem-detector/pkg/util/metrics"
@@ -57,7 +57,7 @@ func TestGenerateStatusForConditions(t *testing.T) {
 			Transition: time.Unix(500, 500),
 		},
 	}
-	logs := []*logtypes.Log{
+	logs := []*systemlogtypes.Log{
 		{
 			Timestamp: time.Unix(1000, 1000),
 			Message:   "test message 1",
@@ -68,12 +68,12 @@ func TestGenerateStatusForConditions(t *testing.T) {
 		},
 	}
 	for c, test := range []struct {
-		rule     logtypes.Rule
+		rule     systemlogtypes.Rule
 		expected types.Status
 	}{
 		// Do not need Pattern because we don't do pattern match in this test
 		{
-			rule: logtypes.Rule{
+			rule: systemlogtypes.Rule{
 				Type:      types.Perm,
 				Condition: testConditionA,
 				Reason:    "test reason",
@@ -84,6 +84,7 @@ func TestGenerateStatusForConditions(t *testing.T) {
 					testConditionA,
 					types.True,
 					"test reason",
+					"test message 1\ntest message 2",
 					time.Unix(1000, 1000),
 				)},
 				Conditions: []types.Condition{
@@ -100,7 +101,7 @@ func TestGenerateStatusForConditions(t *testing.T) {
 		},
 		// Should not update transition time when status and reason are not changed.
 		{
-			rule: logtypes.Rule{
+			rule: systemlogtypes.Rule{
 				Type:      types.Perm,
 				Condition: testConditionA,
 				Reason:    "initial reason",
@@ -119,7 +120,7 @@ func TestGenerateStatusForConditions(t *testing.T) {
 			},
 		},
 		{
-			rule: logtypes.Rule{
+			rule: systemlogtypes.Rule{
 				Type:   types.Temp,
 				Reason: "test reason",
 			},
@@ -155,19 +156,19 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 	testCases := []struct {
 		name            string
 		conditions      []types.Condition
-		triggeredRules  []logtypes.Rule
+		triggeredRules  []systemlogtypes.Rule
 		expectedMetrics []metrics.Int64MetricRepresentation
 	}{
 		{
 			name:            "one temporary problem that has not happened",
 			conditions:      []types.Condition{},
-			triggeredRules:  []logtypes.Rule{},
+			triggeredRules:  []systemlogtypes.Rule{},
 			expectedMetrics: []metrics.Int64MetricRepresentation{},
 		},
 		{
 			name:       "one temporary problem happened once",
 			conditions: []types.Condition{},
-			triggeredRules: []logtypes.Rule{
+			triggeredRules: []systemlogtypes.Rule{
 				{
 					Type:   types.Temp,
 					Reason: "problem reason foo",
@@ -184,7 +185,7 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 		{
 			name:       "one temporary problem happened twice",
 			conditions: []types.Condition{},
-			triggeredRules: []logtypes.Rule{
+			triggeredRules: []systemlogtypes.Rule{
 				{
 					Type:   types.Temp,
 					Reason: "problem reason foo",
@@ -205,7 +206,7 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 		{
 			name:       "two different temporary problems happened",
 			conditions: []types.Condition{},
-			triggeredRules: []logtypes.Rule{
+			triggeredRules: []systemlogtypes.Rule{
 				{
 					Type:   types.Temp,
 					Reason: "problem reason foo",
@@ -236,7 +237,7 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 					Status: types.False,
 				},
 			},
-			triggeredRules: []logtypes.Rule{
+			triggeredRules: []systemlogtypes.Rule{
 				{
 					Type:      types.Perm,
 					Condition: "ConditionA",
@@ -264,7 +265,7 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 					Status: types.False,
 				},
 			},
-			triggeredRules: []logtypes.Rule{
+			triggeredRules: []systemlogtypes.Rule{
 				{
 					Type:      types.Perm,
 					Condition: "ConditionA",
@@ -297,7 +298,7 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 					Status: types.False,
 				},
 			},
-			triggeredRules: []logtypes.Rule{
+			triggeredRules: []systemlogtypes.Rule{
 				{
 					Type:      types.Perm,
 					Condition: "ConditionA",
@@ -344,7 +345,7 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 					Status: types.False,
 				},
 			},
-			triggeredRules: []logtypes.Rule{
+			triggeredRules: []systemlogtypes.Rule{
 				{
 					Type:      types.Perm,
 					Condition: "ConditionA",
@@ -395,7 +396,7 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 			problemmetrics.GlobalProblemMetricsManager = fakePMM
 
 			for _, rule := range test.triggeredRules {
-				l.generateStatus([]*logtypes.Log{{}}, rule)
+				l.generateStatus([]*systemlogtypes.Log{{}}, rule)
 			}
 
 			gotMetrics := append(fakeProblemCounter.ListMetrics(), fakeProblemGauge.ListMetrics()...)
@@ -409,17 +410,17 @@ func TestGenerateStatusForMetrics(t *testing.T) {
 func TestInitializeProblemMetricsOrDie(t *testing.T) {
 	testCases := []struct {
 		name            string
-		rules           []logtypes.Rule
+		rules           []systemlogtypes.Rule
 		expectedMetrics []metrics.Int64MetricRepresentation
 	}{
 		{
 			name:            "no problem type at all",
-			rules:           []logtypes.Rule{},
+			rules:           []systemlogtypes.Rule{},
 			expectedMetrics: []metrics.Int64MetricRepresentation{},
 		},
 		{
 			name: "one type of temporary problem",
-			rules: []logtypes.Rule{
+			rules: []systemlogtypes.Rule{
 				{
 					Type:   types.Temp,
 					Reason: "problem reason foo",
@@ -435,7 +436,7 @@ func TestInitializeProblemMetricsOrDie(t *testing.T) {
 		},
 		{
 			name: "one type of permanent problem",
-			rules: []logtypes.Rule{
+			rules: []systemlogtypes.Rule{
 				{
 					Type:      types.Perm,
 					Condition: "ConditionA",
@@ -457,7 +458,7 @@ func TestInitializeProblemMetricsOrDie(t *testing.T) {
 		},
 		{
 			name: "duplicate temporary problem types",
-			rules: []logtypes.Rule{
+			rules: []systemlogtypes.Rule{
 				{
 					Type:   types.Temp,
 					Reason: "problem reason foo",
@@ -477,7 +478,7 @@ func TestInitializeProblemMetricsOrDie(t *testing.T) {
 		},
 		{
 			name: "multiple temporary problem types",
-			rules: []logtypes.Rule{
+			rules: []systemlogtypes.Rule{
 				{
 					Type:   types.Temp,
 					Reason: "problem reason foo",
@@ -502,7 +503,7 @@ func TestInitializeProblemMetricsOrDie(t *testing.T) {
 		},
 		{
 			name: "multiple permanent problem types with same condition",
-			rules: []logtypes.Rule{
+			rules: []systemlogtypes.Rule{
 				{
 					Type:      types.Perm,
 					Condition: "ConditionA",
@@ -539,7 +540,7 @@ func TestInitializeProblemMetricsOrDie(t *testing.T) {
 		},
 		{
 			name: "multiple permanent problem types with different conditions",
-			rules: []logtypes.Rule{
+			rules: []systemlogtypes.Rule{
 				{
 					Type:      types.Perm,
 					Condition: "ConditionA",
@@ -576,7 +577,7 @@ func TestInitializeProblemMetricsOrDie(t *testing.T) {
 		},
 		{
 			name: "duplicate permanent problem types",
-			rules: []logtypes.Rule{
+			rules: []systemlogtypes.Rule{
 				{
 					Type:      types.Perm,
 					Condition: "ConditionA",
@@ -603,7 +604,7 @@ func TestInitializeProblemMetricsOrDie(t *testing.T) {
 		},
 		{
 			name: "mixture of temporary and permanent problem types",
-			rules: []logtypes.Rule{
+			rules: []systemlogtypes.Rule{
 				{
 					Type:   types.Temp,
 					Reason: "problem reason foo",
@@ -695,6 +696,43 @@ func TestInitializeProblemMetricsOrDie(t *testing.T) {
 
 			assert.ElementsMatch(t, test.expectedMetrics, gotMetrics,
 				"expected metrics: %+v, got: %+v", test.expectedMetrics, gotMetrics)
+		})
+	}
+}
+
+func TestGenerateMessage(t *testing.T) {
+	tests := []struct {
+		name                          string
+		logs                          []*systemlogtypes.Log
+		patternGeneratedMessageSuffix string
+		want                          string
+	}{
+		{
+			name: "No rule message",
+			logs: []*systemlogtypes.Log{
+				{Message: "First log message"},
+				{Message: "Second log message"},
+			},
+			patternGeneratedMessageSuffix: "",
+			want:                          "First log message\nSecond log message",
+		},
+		{
+			name: "With rule message",
+			logs: []*systemlogtypes.Log{
+				{Message: "First log message"},
+				{Message: "Second log message"},
+			},
+			patternGeneratedMessageSuffix: "refer www.foo.com/docs for playbook on how to fix the issue",
+			want:                          "First log message\nSecond log message; refer www.foo.com/docs for playbook on how to fix the issue",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := generateMessage(tt.logs, tt.patternGeneratedMessageSuffix)
+			if got != tt.want {
+				t.Errorf("generateMessage() = %v, want %v", got, tt.want)
+			}
 		})
 	}
 }

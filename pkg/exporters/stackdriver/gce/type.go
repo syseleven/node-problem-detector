@@ -17,8 +17,10 @@ limitations under the License.
 package gce
 
 import (
+	"context"
+
 	"cloud.google.com/go/compute/metadata"
-	"github.com/golang/glog"
+	"k8s.io/klog/v2"
 )
 
 type Metadata struct {
@@ -37,27 +39,29 @@ func (md *Metadata) HasMissingField() bool {
 
 func (md *Metadata) PopulateFromGCE() error {
 	var err error
-	glog.Info("Fetching GCE metadata from metadata server")
+	klog.Info("Fetching GCE metadata from metadata server")
+	// Need to be initialized with a context at the main.
+	ctx := context.TODO()
 	if md.ProjectID == "" {
-		md.ProjectID, err = metadata.ProjectID()
+		md.ProjectID, err = metadata.ProjectIDWithContext(ctx)
 		if err != nil {
 			return err
 		}
 	}
 	if md.Zone == "" {
-		md.Zone, err = metadata.Zone()
+		md.Zone, err = metadata.ZoneWithContext(ctx)
 		if err != nil {
 			return err
 		}
 	}
 	if md.InstanceID == "" {
-		md.InstanceID, err = metadata.InstanceID()
+		md.InstanceID, err = metadata.InstanceIDWithContext(ctx)
 		if err != nil {
 			return err
 		}
 	}
 	if md.InstanceName == "" {
-		md.InstanceName, err = metadata.InstanceName()
+		md.InstanceName, err = metadata.InstanceNameWithContext(ctx)
 		if err != nil {
 			return err
 		}

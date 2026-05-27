@@ -22,12 +22,11 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/clock"
-	"k8s.io/client-go/tools/record"
-
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
+	testclock "k8s.io/utils/clock/testing"
 )
 
 const (
@@ -40,9 +39,9 @@ func newFakeProblemClient() *nodeProblemClient {
 		nodeName: testNode,
 		// There is no proper fake for *client.Client for now
 		// TODO(random-liu): Add test for SetConditions when we have good fake for *client.Client
-		clock:     &clock.FakeClock{},
+		clock:     testclock.NewFakeClock(time.Now()),
 		recorders: make(map[string]record.EventRecorder),
-		nodeRef:   getNodeRef(testNode),
+		nodeRef:   getNodeRef("", testNode),
 	}
 }
 
@@ -84,5 +83,13 @@ func TestEvent(t *testing.T) {
 	got := <-fakeRecorder.Events
 	if expected != got {
 		t.Errorf("expected event %q, got %q", expected, got)
+	}
+}
+
+func TestNodeRefHasAPIVersionV1(t *testing.T) {
+	client := newFakeProblemClient()
+
+	if client.nodeRef.APIVersion != "v1" {
+		t.Errorf("expected nodeRef.APIVersion to be 'v1', got %q", client.nodeRef.APIVersion)
 	}
 }

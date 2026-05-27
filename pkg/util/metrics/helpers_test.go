@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,7 +16,7 @@ limitations under the License.
 package metrics
 
 import (
-	"io/ioutil"
+	"os"
 	"testing"
 )
 
@@ -53,17 +53,17 @@ func TestPrometheusMetricsParsingAndMatching(t *testing.T) {
 				},
 			},
 			notExpectedMetrics: []Float64MetricRepresentation{
-				// Metric with non-existant label.
+				// Metric with non-existent label.
 				{
 					Name:   "host_uptime",
-					Labels: map[string]string{"non-existant-version": "0.0.1"},
+					Labels: map[string]string{"non-existent-version": "0.0.1"},
 				},
 				// Metric with incorrect label.
 				{
 					Name:   "host_uptime",
 					Labels: map[string]string{"kernel_version": "mismatched-version"},
 				},
-				// Non-exsistant metric.
+				// Non-existent metric.
 				{
 					Name:   "host_downtime",
 					Labels: map[string]string{},
@@ -99,17 +99,17 @@ func TestPrometheusMetricsParsingAndMatching(t *testing.T) {
 					Name:   "host_uptime",
 					Labels: map[string]string{},
 				},
-				// Metric with non-existant label.
+				// Metric with non-existent label.
 				{
 					Name:   "host_uptime",
-					Labels: map[string]string{"non-existant-version": "0.0.1"},
+					Labels: map[string]string{"non-existent-version": "0.0.1"},
 				},
 				// Metric with incorrect label.
 				{
 					Name:   "host_uptime",
 					Labels: map[string]string{"kernel_version": "mismatched-version"},
 				},
-				// Non-exsistant metric.
+				// Non-existent metric.
 				{
 					Name:   "host_downtime",
 					Labels: map[string]string{},
@@ -121,7 +121,7 @@ func TestPrometheusMetricsParsingAndMatching(t *testing.T) {
 
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
-			b, err := ioutil.ReadFile(test.metricsTextPath)
+			b, err := os.ReadFile(test.metricsTextPath)
 			if err != nil {
 				t.Errorf("Unexpected error reading file %s: %v", test.metricsTextPath, err)
 			}

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,11 +22,14 @@ import (
 
 	pcm "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 	"go.opencensus.io/tag"
 )
 
-var tagMap map[string]tag.Key
-var tagMapMutex sync.RWMutex
+var (
+	tagMap      map[string]tag.Key
+	tagMapMutex sync.RWMutex
+)
 
 func init() {
 	tagMapMutex.Lock()
@@ -70,7 +73,8 @@ func getTagKeysFromNames(tagNames []string) ([]tag.Key, error) {
 func ParsePrometheusMetrics(metricsText string) ([]Float64MetricRepresentation, error) {
 	var metrics []Float64MetricRepresentation
 
-	var textParser expfmt.TextParser
+	textParser := expfmt.NewTextParser(model.UTF8Validation)
+	metricsText = strings.ReplaceAll(metricsText, "\r", "")
 	metricFamilies, err := textParser.TextToMetricFamilies(strings.NewReader(metricsText))
 	if err != nil {
 		return metrics, err
@@ -84,11 +88,12 @@ func ParsePrometheusMetrics(metricsText string) ([]Float64MetricRepresentation, 
 			}
 
 			var value float64
-			if *metricFamily.Type == pcm.MetricType_COUNTER {
+			switch *metricFamily.Type {
+			case pcm.MetricType_COUNTER:
 				value = *metric.Counter.Value
-			} else if *metricFamily.Type == pcm.MetricType_GAUGE {
+			case pcm.MetricType_GAUGE:
 				value = *metric.Gauge.Value
-			} else {
+			default:
 				return metrics, fmt.Errorf("unexpected MetricType %s for metric %s",
 					pcm.MetricType_name[int32(*metricFamily.Type)], *metricFamily.Name)
 			}
@@ -104,7 +109,8 @@ func ParsePrometheusMetrics(metricsText string) ([]Float64MetricRepresentation, 
 // When strictLabelMatching is set to true, the founded metric labels are identical to the provided labels;
 // when strictLabelMatching is set to false, the founded metric labels are a superset of the provided labels.
 func GetFloat64Metric(metrics []Float64MetricRepresentation, name string, labels map[string]string,
-	strictLabelMatching bool) (Float64MetricRepresentation, error) {
+	strictLabelMatching bool,
+) (Float64MetricRepresentation, error) {
 	for _, metric := range metrics {
 		if metric.Name != name {
 			continue

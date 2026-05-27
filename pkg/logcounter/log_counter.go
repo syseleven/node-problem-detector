@@ -1,3 +1,6 @@
+//go:build journald
+// +build journald
+
 /*
 Copyright 2018 The Kubernetes Authors All rights reserved.
 
@@ -20,7 +23,7 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/util/clock"
+	"k8s.io/utils/clock"
 
 	"k8s.io/node-problem-detector/cmd/logcounter/options"
 	"k8s.io/node-problem-detector/pkg/logcounter/types"
@@ -37,10 +40,11 @@ const (
 )
 
 type logCounter struct {
-	logCh   <-chan *systemtypes.Log
-	buffer  systemlogmonitor.LogBuffer
-	pattern string
-	clock   clock.Clock
+	logCh         <-chan *systemtypes.Log
+	buffer        systemlogmonitor.LogBuffer
+	pattern       string
+	revertPattern string
+	clock         clock.Clock
 }
 
 func NewJournaldLogCounter(options *options.LogCounterOptions) (types.LogCounter, error) {
@@ -56,10 +60,11 @@ func NewJournaldLogCounter(options *options.LogCounterOptions) (types.LogCounter
 		return nil, fmt.Errorf("error watching journald: %v", err)
 	}
 	return &logCounter{
-		logCh:   logCh,
-		buffer:  systemlogmonitor.NewLogBuffer(bufferSize),
-		pattern: options.Pattern,
-		clock:   clock.RealClock{},
+		logCh:         logCh,
+		buffer:        systemlogmonitor.NewLogBuffer(bufferSize),
+		pattern:       options.Pattern,
+		revertPattern: options.RevertPattern,
+		clock:         clock.RealClock{},
 	}, nil
 }
 
@@ -80,6 +85,9 @@ func (e *logCounter) Count() (count int, err error) {
 			e.buffer.Push(log)
 			if len(e.buffer.Match(e.pattern)) != 0 {
 				count++
+			}
+			if e.revertPattern != "" && len(e.buffer.Match(e.revertPattern)) != 0 {
+				count--
 			}
 		case <-e.clock.After(timeout):
 			// Don't block forever if we do not get any new messages

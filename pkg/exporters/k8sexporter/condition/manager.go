@@ -17,18 +17,18 @@ limitations under the License.
 package condition
 
 import (
+	"context"
 	"reflect"
 	"sync"
 	"time"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
+
 	"k8s.io/node-problem-detector/pkg/exporters/k8sexporter/problemclient"
 	"k8s.io/node-problem-detector/pkg/types"
 	problemutil "k8s.io/node-problem-detector/pkg/util"
-
-	"k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/clock"
-
-	"github.com/golang/glog"
 )
 
 const (
@@ -49,7 +49,7 @@ const (
 // not. This addresses 3).
 type ConditionManager interface {
 	// Start starts the condition manager.
-	Start()
+	Start(ctx context.Context)
 	// UpdateCondition updates a specific condition.
 	UpdateCondition(types.Condition)
 	// GetConditions returns all current conditions.
@@ -67,7 +67,7 @@ type conditionManager struct {
 	// No lock is needed in `sync`, because it is in the same goroutine with the
 	// write operation.
 	sync.RWMutex
-	clock        clock.Clock
+	clock        clock.WithTicker
 	latestTry    time.Time
 	resyncNeeded bool
 	client       problemclient.Client
@@ -78,18 +78,18 @@ type conditionManager struct {
 }
 
 // NewConditionManager creates a condition manager.
-func NewConditionManager(client problemclient.Client, clock clock.Clock, heartbeatPeriod time.Duration) ConditionManager {
+func NewConditionManager(client problemclient.Client, clockInUse clock.WithTicker, heartbeatPeriod time.Duration) ConditionManager {
 	return &conditionManager{
 		client:          client,
-		clock:           clock,
+		clock:           clockInUse,
 		updates:         make(map[string]types.Condition),
 		conditions:      make(map[string]types.Condition),
 		heartbeatPeriod: heartbeatPeriod,
 	}
 }
 
-func (c *conditionManager) Start() {
-	go c.syncLoop()
+func (c *conditionManager) Start(ctx context.Context) {
+	go c.syncLoop(ctx)
 }
 
 func (c *conditionManager) UpdateCondition(condition types.Condition) {
@@ -110,15 +110,17 @@ func (c *conditionManager) GetConditions() []types.Condition {
 	return conditions
 }
 
-func (c *conditionManager) syncLoop() {
+func (c *conditionManager) syncLoop(ctx context.Context) {
 	ticker := c.clock.NewTicker(updatePeriod)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C():
 			if c.needUpdates() || c.needResync() || c.needHeartbeat() {
-				c.sync()
+				c.sync(ctx)
 			}
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -141,25 +143,25 @@ func (c *conditionManager) needUpdates() bool {
 // needResync checks whether a resync is needed.
 func (c *conditionManager) needResync() bool {
 	// Only update when resync is needed.
-	return c.clock.Now().Sub(c.latestTry) >= resyncPeriod && c.resyncNeeded
+	return c.clock.Since(c.latestTry) >= resyncPeriod && c.resyncNeeded
 }
 
 // needHeartbeat checks whether a forcible heartbeat is needed.
 func (c *conditionManager) needHeartbeat() bool {
-	return c.clock.Now().Sub(c.latestTry) >= c.heartbeatPeriod
+	return c.clock.Since(c.latestTry) >= c.heartbeatPeriod
 }
 
 // sync synchronizes node conditions with the apiserver.
-func (c *conditionManager) sync() {
+func (c *conditionManager) sync(ctx context.Context) {
 	c.latestTry = c.clock.Now()
 	c.resyncNeeded = false
 	conditions := []v1.NodeCondition{}
 	for i := range c.conditions {
 		conditions = append(conditions, problemutil.ConvertToAPICondition(c.conditions[i]))
 	}
-	if err := c.client.SetConditions(conditions); err != nil {
+	if err := c.client.SetConditions(ctx, conditions); err != nil {
 		// The conditions will be updated again in future sync
-		glog.Errorf("failed to update node conditions: %v", err)
+		klog.Errorf("failed to update node conditions: %v", err)
 		c.resyncNeeded = true
 		return
 	}

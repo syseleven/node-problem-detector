@@ -19,16 +19,23 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/golang/glog"
+	"k8s.io/klog/v2"
+
 	cpmtypes "k8s.io/node-problem-detector/pkg/custompluginmonitor/types"
+	"k8s.io/node-problem-detector/pkg/util"
 	"k8s.io/node-problem-detector/pkg/util/tomb"
 )
+
+// maxCustomPluginBufferBytes is the max bytes that a custom plugin is allowed to
+// send to stdout/stderr. Any bytes exceeding this value will be truncated.
+const maxCustomPluginBufferBytes = 1024 * 4
 
 type Plugin struct {
 	config     cpmtypes.CustomPluginConfig
@@ -54,7 +61,7 @@ func (p *Plugin) GetResultChan() <-chan cpmtypes.Result {
 
 func (p *Plugin) Run() {
 	defer func() {
-		glog.Info("Stopping plugin execution")
+		klog.Info("Stopping plugin execution")
 		close(p.resultChan)
 		p.tomb.Done()
 	}()
@@ -83,9 +90,10 @@ func (p *Plugin) Run() {
 
 // run each rule in parallel and wait for them to complete
 func (p *Plugin) runRules() {
-	glog.Info("Start to run custom plugins")
+	klog.V(3).Info("Start to run custom plugins")
 
 	for _, rule := range p.config.Rules {
+		// syncChan limits concurrent goroutines to configured PluginGlobalConfig.Concurrency value
 		p.syncChan <- struct{}{}
 		p.Add(1)
 		go func(rule *cpmtypes.CustomRule) {
@@ -96,9 +104,12 @@ func (p *Plugin) runRules() {
 
 			start := time.Now()
 			exitStatus, message := p.run(*rule)
-			end := time.Now()
+			level := klog.Level(3)
+			if exitStatus != 0 {
+				level = klog.Level(2)
+			}
 
-			glog.V(3).Infof("Rule: %+v. Start time: %v. End time: %v. Duration: %v", rule, start, end, end.Sub(start))
+			klog.V(level).Infof("Rule: %+v. Start time: %v. End time: %v. Duration: %v", rule, start, time.Now(), time.Since(start))
 
 			result := cpmtypes.Result{
 				Rule:       rule,
@@ -106,14 +117,30 @@ func (p *Plugin) runRules() {
 				Message:    message,
 			}
 
+			// pipes result into resultChan which customPluginMonitor instance generates status from
 			p.resultChan <- result
 
-			glog.Infof("Add check result %+v for rule %+v", result, rule)
+			// Let the result be logged at a higher verbosity level. If there is a change in status it is logged later.
+			klog.V(level).Infof("Add check result %+v for rule %+v", result, rule)
 		}(rule)
 	}
 
 	p.Wait()
-	glog.Info("Finish running custom plugins")
+	klog.V(3).Info("Finish running custom plugins")
+}
+
+// readFromReader reads the maxBytes from the reader and drains the rest.
+func readFromReader(reader io.ReadCloser, maxBytes int64) ([]byte, error) {
+	limitReader := io.LimitReader(reader, maxBytes)
+	data, err := io.ReadAll(limitReader)
+	if err != nil {
+		return []byte{}, err
+	}
+	// Drain the reader
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		return []byte{}, err
+	}
+	return data, nil
 }
 
 func (p *Plugin) run(rule cpmtypes.CustomRule) (exitStatus cpmtypes.Status, output string) {
@@ -127,12 +154,89 @@ func (p *Plugin) run(rule cpmtypes.CustomRule) (exitStatus cpmtypes.Status, outp
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, rule.Path, rule.Args...)
-	stdout, err := cmd.Output()
+	cmd := util.Exec(ctx, rule.Path, rule.Args...)
+
+	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
+		klog.Errorf("Error creating stdout pipe for plugin %q: error - %v", rule.Path, err)
+		return cpmtypes.Unknown, "Error creating stdout pipe for plugin. Please check the error log"
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		klog.Errorf("Error creating stderr pipe for plugin %q: error - %v", rule.Path, err)
+		return cpmtypes.Unknown, "Error creating stderr pipe for plugin. Please check the error log"
+	}
+	if err := cmd.Start(); err != nil {
+		klog.Errorf("Error in starting plugin %q: error - %v", rule.Path, err)
+		return cpmtypes.Unknown, "Error in starting plugin. Please check the error log"
+	}
+
+	waitChan := make(chan struct{})
+	defer close(waitChan)
+
+	var m sync.Mutex
+	timeout := false
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.Canceled {
+				return
+			}
+			klog.Errorf("Error in running plugin timeout %q", rule.Path)
+			if cmd.Process == nil || cmd.Process.Pid == 0 {
+				klog.Errorf("Error in cmd.Process check %q", rule.Path)
+				break
+			}
+
+			m.Lock()
+			timeout = true
+			m.Unlock()
+
+			err := util.Kill(cmd)
+			if err != nil {
+				klog.Errorf("Error in kill process %d, %v", cmd.Process.Pid, err)
+			}
+		case <-waitChan:
+			return
+		}
+	}()
+
+	var (
+		wg        sync.WaitGroup
+		stdout    []byte
+		stderr    []byte
+		stdoutErr error
+		stderrErr error
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		stdout, stdoutErr = readFromReader(stdoutPipe, maxCustomPluginBufferBytes)
+	}()
+	go func() {
+		defer wg.Done()
+		stderr, stderrErr = readFromReader(stderrPipe, maxCustomPluginBufferBytes)
+	}()
+	// This will wait for the reads to complete. If the execution times out, the pipes
+	// will be closed and the wait group unblocks.
+	wg.Wait()
+
+	if stdoutErr != nil {
+		klog.Errorf("Error reading stdout for plugin %q: error - %v", rule.Path, err)
+		return cpmtypes.Unknown, "Error reading stdout for plugin. Please check the error log"
+	}
+
+	if stderrErr != nil {
+		klog.Errorf("Error reading stderr for plugin %q: error - %v", rule.Path, err)
+		return cpmtypes.Unknown, "Error reading stderr for plugin. Please check the error log"
+	}
+
+	if err := cmd.Wait(); err != nil {
 		if _, ok := err.(*exec.ExitError); !ok {
-			glog.Errorf("Error in running plugin %q: error - %v. output - %q", rule.Path, err, string(stdout))
-			return cpmtypes.Unknown, "Error in running plugin. Please check the error log"
+			klog.Errorf("Error in waiting for plugin %q: error - %v. output - %q", rule.Path, err, string(stdout))
+			return cpmtypes.Unknown, "Error in waiting for plugin. Please check the error log"
 		}
 	}
 
@@ -140,7 +244,11 @@ func (p *Plugin) run(rule cpmtypes.CustomRule) (exitStatus cpmtypes.Status, outp
 	output = string(stdout)
 	output = strings.TrimSpace(output)
 
-	if cmd.ProcessState.Sys().(syscall.WaitStatus).Signaled() {
+	m.Lock()
+	cmdKilled := timeout
+	m.Unlock()
+
+	if cmdKilled {
 		output = fmt.Sprintf("Timeout when running plugin %q: state - %s. output - %q", rule.Path, cmd.ProcessState.String(), output)
 	}
 
@@ -152,15 +260,26 @@ func (p *Plugin) run(rule cpmtypes.CustomRule) (exitStatus cpmtypes.Status, outp
 	exitCode := cmd.ProcessState.Sys().(syscall.WaitStatus).ExitStatus()
 	switch exitCode {
 	case 0:
+		logPluginStderr(rule, string(stderr), 3)
 		return cpmtypes.OK, output
 	case 1:
+		logPluginStderr(rule, string(stderr), 0)
 		return cpmtypes.NonOK, output
 	default:
+		logPluginStderr(rule, string(stderr), 0)
 		return cpmtypes.Unknown, output
 	}
 }
 
+// Stop the plugin.
 func (p *Plugin) Stop() {
 	p.tomb.Stop()
-	glog.Info("Stop plugin execution")
+	klog.Info("Stop plugin execution")
+}
+
+func logPluginStderr(rule cpmtypes.CustomRule, logs string, logLevel klog.Level) {
+	if len(logs) != 0 {
+		klog.V(logLevel).Infof("Start logs from plugin %+v \n %s", rule, logs)
+		klog.V(logLevel).Infof("End logs from plugin %+v", rule)
+	}
 }

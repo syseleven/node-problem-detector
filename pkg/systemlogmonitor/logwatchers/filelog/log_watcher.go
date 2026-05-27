@@ -19,15 +19,11 @@ package filelog
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
-	utilclock "code.cloudfoundry.org/clock"
-	"github.com/golang/glog"
-	"github.com/google/cadvisor/utils/tail"
+	"k8s.io/klog/v2"
 
 	"k8s.io/node-problem-detector/pkg/systemlogmonitor/logwatchers/types"
 	logtypes "k8s.io/node-problem-detector/pkg/systemlogmonitor/types"
@@ -43,7 +39,6 @@ type filelogWatcher struct {
 	logCh      chan *logtypes.Log
 	startTime  time.Time
 	tomb       *tomb.Tomb
-	clock      utilclock.Clock
 }
 
 // NewSyslogWatcherOrDie creates a new log watcher. The function panics
@@ -51,11 +46,11 @@ type filelogWatcher struct {
 func NewSyslogWatcherOrDie(cfg types.WatcherConfig) types.LogWatcher {
 	uptime, err := util.GetUptimeDuration()
 	if err != nil {
-		glog.Fatalf("failed to get uptime: %v", err)
+		klog.Fatalf("failed to get uptime: %v", err)
 	}
 	startTime, err := util.GetStartTime(time.Now(), uptime, cfg.Lookback, cfg.Delay)
 	if err != nil {
-		glog.Fatalf("failed to get start time: %v", err)
+		klog.Fatalf("failed to get start time: %v", err)
 	}
 
 	return &filelogWatcher{
@@ -65,11 +60,10 @@ func NewSyslogWatcherOrDie(cfg types.WatcherConfig) types.LogWatcher {
 		tomb:       tomb.NewTomb(),
 		// A capacity 1000 buffer should be enough
 		logCh: make(chan *logtypes.Log, 1000),
-		clock: utilclock.NewClock(),
 	}
 }
 
-// Make sure NewSyslogWathcer is types.WatcherCreateFunc.
+// Make sure NewSyslogWatcher is types.WatcherCreateFunc.
 var _ types.WatcherCreateFunc = NewSyslogWatcherOrDie
 
 // Watch starts the filelog watcher.
@@ -80,7 +74,7 @@ func (s *filelogWatcher) Watch() (<-chan *logtypes.Log, error) {
 	}
 	s.reader = bufio.NewReader(r)
 	s.closer = r
-	glog.Info("Start watching filelog")
+	klog.Info("Start watching filelog")
 	go s.watchLoop()
 	return s.logCh, nil
 }
@@ -97,7 +91,9 @@ const watchPollInterval = 500 * time.Millisecond
 // watchLoop is the main watch loop of filelog watcher.
 func (s *filelogWatcher) watchLoop() {
 	defer func() {
-		s.closer.Close()
+		if err := s.closer.Close(); err != nil {
+			klog.Errorf("Failed to close log file: %v", err)
+		}
 		close(s.logCh)
 		s.tomb.Done()
 	}()
@@ -105,14 +101,14 @@ func (s *filelogWatcher) watchLoop() {
 	for {
 		select {
 		case <-s.tomb.Stopping():
-			glog.Infof("Stop watching filelog")
+			klog.Infof("Stop watching filelog")
 			return
 		default:
 		}
 
 		line, err := s.reader.ReadString('\n')
 		if err != nil && err != io.EOF {
-			glog.Errorf("Exiting filelog watch with error: %v", err)
+			klog.Errorf("Exiting filelog watch with error: %v", err)
 			return
 		}
 		buffer.WriteString(line)
@@ -122,39 +118,28 @@ func (s *filelogWatcher) watchLoop() {
 		}
 		line = buffer.String()
 		buffer.Reset()
+		if s.filterSkipList(line) {
+			continue
+		}
 		log, err := s.translator.translate(strings.TrimSuffix(line, "\n"))
 		if err != nil {
-			glog.Warningf("Unable to parse line: %q, %v", line, err)
+			klog.Warningf("Unable to parse line: %q, %v", line, err)
 			continue
 		}
 		// Discard messages before start time.
 		if log.Timestamp.Before(s.startTime) {
-			glog.V(5).Infof("Throwing away msg %q before start time: %v < %v", log.Message, log.Timestamp, s.startTime)
+			klog.V(5).Infof("Throwing away msg %q before start time: %v < %v", log.Message, log.Timestamp, s.startTime)
 			continue
 		}
 		s.logCh <- log
 	}
 }
 
-// getLogReader returns log reader for filelog log. Note that getLogReader doesn't look back
-// to the rolled out logs.
-func getLogReader(path string) (io.ReadCloser, error) {
-	if path == "" {
-		return nil, fmt.Errorf("unexpected empty log path")
+func (s *filelogWatcher) filterSkipList(line string) bool {
+	for _, skipItem := range s.cfg.SkipList {
+		if strings.Contains(line, skipItem) {
+			return true
+		}
 	}
-	// To handle log rotation, tail will not report error immediately if
-	// the file doesn't exist. So we check file existence first.
-	// This could go wrong during mid-rotation. It should recover after
-	// several restart when the log file is created again. The chance
-	// is slim but we should still fix this in the future.
-	// TODO(random-liu): Handle log missing during rotation.
-	_, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat the file %q: %v", path, err)
-	}
-	tail, err := tail.NewTail(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to tail the file %q: %v", path, err)
-	}
-	return tail, nil
+	return false
 }

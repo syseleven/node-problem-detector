@@ -1,4 +1,4 @@
-// +build !disable_custom_plugin_monitor
+//go:build !disable_custom_plugin_monitor
 
 /*
 Copyright 2019 The Kubernetes Authors All rights reserved.

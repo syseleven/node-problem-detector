@@ -17,24 +17,23 @@ limitations under the License.
 package problemclient
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/clock"
+	"k8s.io/apimachinery/pkg/runtime"
 	clientset "k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 
-	"github.com/golang/glog"
-	"k8s.io/heapster/common/kubernetes"
 	"k8s.io/node-problem-detector/cmd/options"
 	"k8s.io/node-problem-detector/pkg/version"
 )
@@ -42,22 +41,23 @@ import (
 // Client is the interface of problem client
 type Client interface {
 	// GetConditions get all specific conditions of current node.
-	GetConditions(conditionTypes []v1.NodeConditionType) ([]*v1.NodeCondition, error)
+	GetConditions(ctx context.Context, conditionTypes []v1.NodeConditionType) ([]*v1.NodeCondition, error)
 	// SetConditions set or update conditions of current node.
-	SetConditions(conditions []v1.NodeCondition) error
+	SetConditions(ctx context.Context, conditionTypes []v1.NodeCondition) error
 	// Eventf reports the event.
 	Eventf(eventType string, source, reason, messageFmt string, args ...interface{})
 	// GetNode returns the Node object of the node on which the
 	// node-problem-detector runs.
-	GetNode() (*v1.Node, error)
+	GetNode(ctx context.Context) (*v1.Node, error)
 }
 
 type nodeProblemClient struct {
-	nodeName  string
-	client    typedcorev1.CoreV1Interface
-	clock     clock.Clock
-	recorders map[string]record.EventRecorder
-	nodeRef   *v1.ObjectReference
+	nodeName       string
+	client         typedcorev1.CoreV1Interface
+	clock          clock.Clock
+	recorders      map[string]record.EventRecorder
+	nodeRef        *v1.ObjectReference
+	eventNamespace string
 }
 
 // NewClientOrDie creates a new problem client, panics if error occurs.
@@ -67,22 +67,24 @@ func NewClientOrDie(npdo *options.NodeProblemDetectorOptions) Client {
 	// we have checked it is a valid URI after command line argument is parsed.:)
 	uri, _ := url.Parse(npdo.ApiServerOverride)
 
-	cfg, err := kubernetes.GetKubeClientConfig(uri)
+	cfg, err := getKubeClientConfig(uri)
 	if err != nil {
 		panic(err)
 	}
 
 	cfg.UserAgent = fmt.Sprintf("%s/%s", filepath.Base(os.Args[0]), version.Version())
-	// TODO(random-liu): Set QPS Limit
+	cfg.QPS = npdo.QPS
+	cfg.Burst = npdo.Burst
 	c.client = clientset.NewForConfigOrDie(cfg).CoreV1()
 	c.nodeName = npdo.NodeName
-	c.nodeRef = getNodeRef(c.nodeName)
+	c.eventNamespace = npdo.EventNamespace
+	c.nodeRef = getNodeRef(c.eventNamespace, c.nodeName)
 	c.recorders = make(map[string]record.EventRecorder)
 	return c
 }
 
-func (c *nodeProblemClient) GetConditions(conditionTypes []v1.NodeConditionType) ([]*v1.NodeCondition, error) {
-	node, err := c.GetNode()
+func (c *nodeProblemClient) GetConditions(ctx context.Context, conditionTypes []v1.NodeConditionType) ([]*v1.NodeCondition, error) {
+	node, err := c.GetNode(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +99,7 @@ func (c *nodeProblemClient) GetConditions(conditionTypes []v1.NodeConditionType)
 	return conditions, nil
 }
 
-func (c *nodeProblemClient) SetConditions(newConditions []v1.NodeCondition) error {
+func (c *nodeProblemClient) SetConditions(ctx context.Context, newConditions []v1.NodeCondition) error {
 	for i := range newConditions {
 		// Each time we update the conditions, we update the heart beat time
 		newConditions[i].LastHeartbeatTime = metav1.NewTime(c.clock.Now())
@@ -106,21 +108,31 @@ func (c *nodeProblemClient) SetConditions(newConditions []v1.NodeCondition) erro
 	if err != nil {
 		return err
 	}
-	return c.client.RESTClient().Patch(types.StrategicMergePatchType).Resource("nodes").Name(c.nodeName).SubResource("status").Body(patch).Do().Error()
+	return retry.OnError(retry.DefaultRetry,
+		func(error) bool {
+			return true
+		},
+		func() error {
+			_, err := c.client.Nodes().PatchStatus(ctx, c.nodeName, patch)
+			return err
+		},
+	)
 }
 
 func (c *nodeProblemClient) Eventf(eventType, source, reason, messageFmt string, args ...interface{}) {
 	recorder, found := c.recorders[source]
 	if !found {
 		// TODO(random-liu): If needed use separate client and QPS limit for event.
-		recorder = getEventRecorder(c.client, c.nodeName, source)
+		recorder = getEventRecorder(c.client, c.eventNamespace, c.nodeName, source)
 		c.recorders[source] = recorder
 	}
 	recorder.Eventf(c.nodeRef, eventType, reason, messageFmt, args...)
 }
 
-func (c *nodeProblemClient) GetNode() (*v1.Node, error) {
-	return c.client.Nodes().Get(c.nodeName, metav1.GetOptions{})
+func (c *nodeProblemClient) GetNode(ctx context.Context) (*v1.Node, error) {
+	// To reduce the load on APIServer & etcd, we are serving GET operations from
+	// apiserver cache (the data might be slightly delayed).
+	return c.client.Nodes().Get(ctx, c.nodeName, metav1.GetOptions{ResourceVersion: "0"})
 }
 
 // generatePatch generates condition patch
@@ -133,20 +145,20 @@ func generatePatch(conditions []v1.NodeCondition) ([]byte, error) {
 }
 
 // getEventRecorder generates a recorder for specific node name and source.
-func getEventRecorder(c typedcorev1.CoreV1Interface, nodeName, source string) record.EventRecorder {
+func getEventRecorder(c typedcorev1.CoreV1Interface, namespace, nodeName, source string) record.EventRecorder {
 	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(glog.V(4).Infof)
-	recorder := eventBroadcaster.NewRecorder(legacyscheme.Scheme, v1.EventSource{Component: source, Host: nodeName})
-	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: c.Events("")})
+	eventBroadcaster.StartLogging(klog.V(4).Infof)
+	recorder := eventBroadcaster.NewRecorder(runtime.NewScheme(), v1.EventSource{Component: source, Host: nodeName})
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: c.Events(namespace)})
 	return recorder
 }
 
-func getNodeRef(nodeName string) *v1.ObjectReference {
+func getNodeRef(namespace, nodeName string) *v1.ObjectReference {
 	// TODO(random-liu): Get node to initialize the node reference
 	return &v1.ObjectReference{
-		Kind:      "Node",
-		Name:      nodeName,
-		UID:       types.UID(nodeName),
-		Namespace: "",
+		APIVersion: "v1",
+		Kind:       "Node",
+		Name:       nodeName,
+		Namespace:  namespace,
 	}
 }

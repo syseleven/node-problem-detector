@@ -1,4 +1,4 @@
-// +build !disable_stackdriver_exporter
+//go:build !disable_stackdriver_exporter
 
 /*
 Copyright 2019 The Kubernetes Authors All rights reserved.

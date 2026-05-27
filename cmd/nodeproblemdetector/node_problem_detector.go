@@ -17,10 +17,9 @@ limitations under the License.
 package main
 
 import (
-	"os"
+	"context"
 
-	"github.com/golang/glog"
-	"github.com/spf13/pflag"
+	"k8s.io/klog/v2"
 
 	_ "k8s.io/node-problem-detector/cmd/nodeproblemdetector/exporterplugins"
 	_ "k8s.io/node-problem-detector/cmd/nodeproblemdetector/problemdaemonplugins"
@@ -34,15 +33,10 @@ import (
 	"k8s.io/node-problem-detector/pkg/version"
 )
 
-func main() {
-	npdo := options.NewNodeProblemDetectorOptions()
-	npdo.AddFlags(pflag.CommandLine)
-
-	pflag.Parse()
-
+func npdMain(ctx context.Context, npdo *options.NodeProblemDetectorOptions) error {
 	if npdo.PrintVersion {
 		version.PrintVersion()
-		os.Exit(0)
+		return nil
 	}
 
 	npdo.SetNodeNameOrDie()
@@ -52,18 +46,18 @@ func main() {
 	// Initialize problem daemons.
 	problemDaemons := problemdaemon.NewProblemDaemons(npdo.MonitorConfigPaths)
 	if len(problemDaemons) == 0 {
-		glog.Fatalf("No problem daemon is configured")
+		klog.Fatalf("No problem daemon is configured")
 	}
 
 	// Initialize exporters.
 	defaultExporters := []types.Exporter{}
-	if ke := k8sexporter.NewExporterOrDie(npdo); ke != nil {
+	if ke := k8sexporter.NewExporterOrDie(ctx, npdo); ke != nil {
 		defaultExporters = append(defaultExporters, ke)
-		glog.Info("K8s exporter started.")
+		klog.Info("K8s exporter started.")
 	}
 	if pe := prometheusexporter.NewExporterOrDie(npdo); pe != nil {
 		defaultExporters = append(defaultExporters, pe)
-		glog.Info("Prometheus exporter started.")
+		klog.Info("Prometheus exporter started.")
 	}
 
 	plugableExporters := exporters.NewExporters()
@@ -73,12 +67,10 @@ func main() {
 	npdExporters = append(npdExporters, plugableExporters...)
 
 	if len(npdExporters) == 0 {
-		glog.Fatalf("No exporter is successfully setup")
+		klog.Fatalf("No exporter is successfully setup")
 	}
 
 	// Initialize NPD core.
 	p := problemdetector.NewProblemDetector(problemDaemons, npdExporters)
-	if err := p.Run(); err != nil {
-		glog.Fatalf("Problem detector failed with error: %v", err)
-	}
+	return p.Run(ctx)
 }
