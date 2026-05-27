@@ -3,7 +3,7 @@ name: tag-release
 on:
   push:
     branches:
-      - master
+      - syseleven/master
       - 'release-*'
     paths:
       - version.txt
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   tag:
-    if: ${{ github.repository == 'kubernetes/node-problem-detector' }}
+    if: ${{ github.repository == 'syseleven/node-problem-detector' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
